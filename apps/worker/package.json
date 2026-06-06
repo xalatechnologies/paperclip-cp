@@ -1,0 +1,19 @@
+{
+  "name": "@pcc/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "echo 'Worker runs as Convex scheduled functions — run: pnpm convex:dev from root'",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@pcc/paperclip-sdk": "workspace:*",
+    "@pcc/shared-types": "workspace:*",
+    "convex": "^1.24.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

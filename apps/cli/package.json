@@ -1,0 +1,26 @@
+{
+  "name": "@pcc/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "pcc": "./src/index.ts"
+  },
+  "scripts": {
+    "dev": "echo \"CLI ready — run: pnpm pcc <command>\"",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@pcc/shared-types": "workspace:*",
+    "chalk": "^5.4.0",
+    "commander": "^13.0.0",
+    "dotenv": "^16.5.0",
+    "ora": "^8.1.0",
+    "table": "^6.9.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

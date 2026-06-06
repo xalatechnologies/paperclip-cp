@@ -1,0 +1,45 @@
+{
+  "id": "doxis",
+  "displayName": "Doxis Engineering Studio",
+  "paperclipCompanyId": "REPLACE_WITH_REAL_PAPERCLIP_COMPANY_ID",
+  "mission": "Build and maintain the Doxis platform with AI-assisted engineering: reduce regression risk, improve maintainability, and accelerate delivery through reusable agent-driven workflows.",
+  "agents": [
+    {
+      "slug": "engineering-lead",
+      "displayName": "Engineering Lead",
+      "role": "Orchestrates tasks, reviews plans, coordinates agents",
+      "skills": ["context-budget-guard", "deep-review"],
+      "heartbeatIntervalSeconds": 60
+    },
+    {
+      "slug": "bug-fix-agent",
+      "displayName": "Bug Fix Agent",
+      "role": "Investigates and fixes bugs with regression notes",
+      "skills": ["bug-fixing", "context-budget-guard"],
+      "heartbeatIntervalSeconds": 60
+    },
+    {
+      "slug": "deep-review-agent",
+      "displayName": "Deep Review Agent",
+      "role": "Multi-pass code review against quality and security standards",
+      "skills": ["deep-review", "context-budget-guard"],
+      "heartbeatIntervalSeconds": 120
+    },
+    {
+      "slug": "qa-release-agent",
+      "displayName": "QA Release Agent",
+      "role": "Validates release readiness, regression tests, release notes",
+      "skills": ["context-budget-guard"],
+      "heartbeatIntervalSeconds": 120
+    }
+  ],
+  "integrations": ["slack", "github"],
+  "budgetPerDay": null,
+  "projects": [
+    {
+      "slug": "smartforms",
+      "displayName": "SmartForms Modernization",
+      "description": "Reduce regression risk and improve editor maintainability in the Doxis SmartForms module"
+    }
+  ]
+}

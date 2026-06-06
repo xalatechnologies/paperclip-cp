@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "baseUrl": ".",
+    "paths": {
+      "@pcc/shared-types": ["./packages/shared-types/src/index.ts"],
+      "@pcc/paperclip-sdk": ["./packages/paperclip-sdk/src/index.ts"],
+      "@pcc/db": ["./packages/db/src/index.ts"],
+      "@pcc/config": ["./packages/config/src/index.ts"]
+    }
+  },
+  "exclude": ["node_modules", "dist", ".next"]
+}
