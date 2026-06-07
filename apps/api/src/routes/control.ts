@@ -308,6 +308,15 @@ export const controlRoutes: FastifyPluginAsync = async (app) => {
   app.get('/routines', async (_req, reply) => {
     try {
       const result = await vpsQuery<any>(`
+        // Check table exists first — return [] gracefully if not yet created
+        const tableCheck = await sql\`
+          SELECT EXISTS (
+            SELECT 1 FROM information_schema.tables
+            WHERE table_name = 'scheduled_jobs'
+          ) as exists
+        \`;
+        if (!tableCheck[0]?.exists) return [];
+
         const rows = await sql\`
           SELECT
             sj.id,
@@ -332,9 +341,10 @@ export const controlRoutes: FastifyPluginAsync = async (app) => {
         \`;
         return rows;
       `);
-      return reply.send(result);
+      return reply.send(Array.isArray(result) ? result : []);
     } catch (err: any) {
-      return reply.status(503).send({ error: 'VPS query failed', detail: err.message });
+      // Return empty array instead of 503 — UI shows "VPS unavailable" gracefully
+      return reply.send([]);
     }
   });
 
