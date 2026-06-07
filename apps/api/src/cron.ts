@@ -11,9 +11,11 @@
  * all active schedules — call after creating/toggling a routine.
  */
 
-import { schedule as nodeCronSchedule, validate as cronValidate, getTasks } from 'node-cron';
-import { routinesDb, routineRunsDb } from './db.js';
+import { schedule as nodeCronSchedule, validate as cronValidate } from 'node-cron';
+import { routinesDb, routineRunsDb, memoryDb } from './db.js';
+import { estimateTokens } from './embeddings.js';
 import type { ScheduledTask } from 'node-cron';
+import OpenAI from 'openai';
 
 // ---------------------------------------------------------------------------
 // Paperclip agent trigger — calls the VPS REST API that Paperclip exposes
@@ -55,6 +57,60 @@ async function triggerAgent(agentId: string, skillSlug: string | null): Promise<
 // Run a routine (called by cron tick OR manual "Run Now")
 // ---------------------------------------------------------------------------
 
+/**
+ * Auto-distill: extract memory facts from a run output via LLM.
+ * Fires best-effort — errors are logged but don't block.
+ */
+async function distillRunOutput(
+  agentId: string,
+  companyId: string,
+  runId: string,
+  output: string,
+  error: string | null,
+): Promise<void> {
+  if (!process.env.OPENAI_API_KEY) return;
+  if (!output?.trim() && !error?.trim()) return;
+
+  try {
+    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const prompt = `Extract up to 4 concise, reusable facts from this agent run. Return JSON array only:
+[{"type":"fact"|"summary"|"error"|"preference","content":"...","importance":1-5}]
+
+Output:
+${(output ?? '').slice(0, 3000)}${error ? `\nError: ${error.slice(0, 500)}` : ''}`;
+
+    const res = await client.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: 600,
+      temperature: 0.2,
+    });
+
+    let facts: any[] = [];
+    try { facts = JSON.parse(res.choices[0].message.content ?? '[]'); } catch {}
+    if (!Array.isArray(facts)) facts = [];
+
+    for (const f of facts.slice(0, 4)) {
+      if (!f?.content) continue;
+      memoryDb.insert.run({
+        paperclip_agent_id: agentId,
+        paperclip_company_id: companyId,
+        type: ['fact','summary','error','preference'].includes(f.type) ? f.type : 'fact',
+        content: String(f.content).slice(0, 500),
+        source: runId,
+        importance: Math.min(5, Math.max(1, parseInt(f.importance, 10) || 3)),
+        token_count: estimateTokens(f.content),
+        expires_at: null,
+      });
+    }
+    if (facts.length > 0) {
+      console.log(`[cron] Auto-distilled ${facts.length} memory entries from run ${runId}`);
+    }
+  } catch (err: any) {
+    console.error('[cron] Distillation failed:', err.message);
+  }
+}
+
 export async function executeRoutine(routineId: string): Promise<void> {
   const routine = routinesDb.get.get(routineId) as any;
   if (!routine) return;
@@ -83,6 +139,15 @@ export async function executeRoutine(routineId: string): Promise<void> {
     error: result.success ? null : result.output,
     duration: result.duration_sec,
   });
+
+  // Auto-distill memory from run output (best-effort, async)
+  distillRunOutput(
+    routine.paperclip_agent_id,
+    routine.paperclip_company_id,
+    runId,
+    result.output,
+    result.success ? null : result.output,
+  ).catch(() => {});
 
   console.log(`[cron] Routine "${routine.name}" → ${result.success ? 'success' : 'FAILED'} (${result.duration_sec.toFixed(1)}s)`);
 }

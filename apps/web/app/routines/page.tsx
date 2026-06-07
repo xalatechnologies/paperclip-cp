@@ -2,9 +2,10 @@
 
 import { useState, useCallback, useEffect } from 'react';
 import {
-  CalendarClock, Plus, Play, RefreshCw, Trash2, Clock,
-  Bot, CheckCircle, AlertTriangle, Activity, BookOpen,
+  CalendarClock, Play, RefreshCw, Clock,
+  Bot, CheckCircle, AlertTriangle, Activity,
   ToggleRight, ToggleLeft, ChevronDown, ChevronRight,
+  Building2, Zap, Timer,
 } from 'lucide-react';
 import { TEXT, LAYOUT, CARD } from '@/lib/tokens';
 import { cn } from '@/lib/utils';
@@ -21,34 +22,42 @@ const AUTH = {
   'Content-Type': 'application/json',
 };
 
-// Returns [] when the response is not OK or not an array (e.g. 503 error object)
 async function safeArr(res: Response): Promise<any[]> {
   if (!res.ok) return [];
   try { const d = await res.json(); return Array.isArray(d) ? d : []; }
   catch { return []; }
 }
 
-// ── Types ─────────────────────────────────────────────────────────────────
+// ── Types (Paperclip VPS schema) ──────────────────────────────────────────
 
 interface Routine {
   id: string;
   name: string;
-  paperclip_company_id: string;
-  paperclip_agent_id: string;
+  cron_expression: string;
+  enabled: boolean;
+  agent_id: string;
   skill_slug: string | null;
-  schedule: string;
-  enabled: number;
-  last_run_at: number | null;
-  last_status: 'success' | 'failed' | null;
-  last_error: string | null;
+  company_id: string;
+  last_run_at: string | null;
+  last_status: 'success' | 'failed' | 'triggered' | null;
   run_count: number;
   avg_duration_sec: number | null;
-  created_at: number;
+  agent_name: string | null;
+  adapter_type: string | null;
+  company_name: string | null;
+  company_issue_prefix?: string | null;
 }
 
-interface VpsAgent { id: string; name: string; role: string; company_id: string; company_name: string; }
-interface VpsSkill { slug: string; name: string; company_id: string; }
-interface VpsCompany { id: string; name: string; }
+interface RunRecord {
+  id: string;
+  scheduled_job_id: string;
+  started_at: string;
+  finished_at: string | null;
+  status: string;
+  duration_sec: number | null;
+  output: string | null;
+  error: string | null;
+}
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -58,130 +67,177 @@ function fmtDuration(sec: number | null) {
   return `${Math.floor(sec / 60)}m ${(sec % 60).toFixed(0)}s`;
 }
 
-function fmtRelative(ts: number | null) {
+function fmtRelative(ts: string | null) {
   if (!ts) return 'Never';
-  const diff = Date.now() - ts * 1000;
-  const h = Math.floor(diff / 3600000);
-  if (h < 1) return `${Math.floor(diff / 60000)}m ago`;
-  if (h < 24) return `${h}h ago`;
-  return `${Math.floor(h / 24)}d ago`;
+  const diff = Date.now() - new Date(ts).getTime();
+  if (diff < 60000) return 'Just now';
+  if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
+  if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
+  return new Date(ts).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
-const CRON_PRESETS = [
-  { label: 'Every 30 min', value: '*/30 * * * *' },
-  { label: 'Hourly',       value: '0 * * * *' },
-  { label: 'Daily 02:00',  value: '0 2 * * *' },
-  { label: 'Daily 08:00',  value: '0 8 * * *' },
-  { label: 'Monday 09:00', value: '0 9 * * 1' },
-  { label: 'Friday 10:00', value: '0 10 * * 5' },
-];
+function StatusBadge({ status }: { status: Routine['last_status'] }) {
+  if (status === 'success') return (
+    <span className="flex items-center gap-1 text-[11px] font-semibold text-success bg-success/10 px-2 py-0.5 rounded-full">
+      <CheckCircle className="w-3 h-3" /> success
+    </span>
+  );
+  if (status === 'failed') return (
+    <span className="flex items-center gap-1 text-[11px] font-semibold text-destructive bg-destructive/10 px-2 py-0.5 rounded-full">
+      <AlertTriangle className="w-3 h-3" /> failed
+    </span>
+  );
+  if (status === 'triggered') return (
+    <span className="flex items-center gap-1 text-[11px] font-semibold text-warning bg-warning/10 px-2 py-0.5 rounded-full">
+      <Activity className="w-3 h-3" /> triggered
+    </span>
+  );
+  return <span className="text-[11px] text-muted-foreground/50">—</span>;
+}
 
-// ─── Add Form ─────────────────────────────────────────────────────────────
+// ── Routine Row ────────────────────────────────────────────────────────────
 
-function AddRoutineForm({
-  agents, skills, companies, onAdd, onClose,
+function RoutineRow({
+  routine,
+  onToggle,
+  onRun,
 }: {
-  agents: VpsAgent[]; skills: VpsSkill[]; companies: VpsCompany[];
-  onAdd: (d: any) => Promise<void>; onClose: () => void;
+  routine: Routine;
+  onToggle: (id: string, enabled: boolean) => Promise<void>;
+  onRun: (id: string) => Promise<void>;
 }) {
-  const [form, setForm] = useState({
-    name: '',
-    paperclip_company_id: companies[0]?.id ?? '',
-    paperclip_agent_id: agents[0]?.id ?? '',
-    skill_slug: '',
-    schedule: '0 2 * * *',
-  });
-  const [saving, setSaving] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [runs, setRuns] = useState<RunRecord[]>([]);
+  const [loadingRuns, setLoadingRuns] = useState(false);
+  const [running, setRunning] = useState(false);
+  const [toggling, setToggling] = useState(false);
 
-  const filteredAgents = form.paperclip_company_id
-    ? agents.filter(a => a.company_id === form.paperclip_company_id)
-    : agents;
-  const filteredSkills = form.paperclip_company_id
-    ? skills.filter(s => s.company_id === form.paperclip_company_id)
-    : skills;
+  const fetchRuns = async () => {
+    setLoadingRuns(true);
+    const res = await fetch(`${API}/api/control/routines/${routine.id}/runs`, { headers: AUTH });
+    setRuns(await safeArr(res));
+    setLoadingRuns(false);
+  };
 
-  const submit = async () => {
-    if (!form.name.trim() || !form.paperclip_agent_id) {
-      setErr('Name and agent are required'); return;
-    }
-    setSaving(true); setErr(null);
-    try {
-      await onAdd({ ...form, skill_slug: form.skill_slug || null });
-      onClose();
-    } catch (e: any) { setErr(e.message); }
-    finally { setSaving(false); }
+  const handleExpand = () => {
+    const next = !expanded;
+    setExpanded(next);
+    if (next && runs.length === 0) fetchRuns();
+  };
+
+  const handleRun = async () => {
+    setRunning(true);
+    try { await onRun(routine.id); await fetchRuns(); }
+    finally { setRunning(false); }
+  };
+
+  const handleToggle = async () => {
+    setToggling(true);
+    try { await onToggle(routine.id, !routine.enabled); }
+    finally { setToggling(false); }
   };
 
   return (
-    <div className="bg-card border border-primary/20 rounded-xl overflow-hidden">
-      <div className="px-5 py-4 border-b border-border flex items-center justify-between">
-        <h3 className="text-[14px] font-semibold text-card-foreground">New Routine</h3>
-        <button onClick={onClose} className="text-[18px] text-muted-foreground/40 hover:text-foreground">×</button>
-      </div>
-      <div className="p-5 grid grid-cols-3 gap-4">
-        <div className="col-span-2">
-          <label className={cn(TEXT.label, 'block mb-1.5')}>Name</label>
-          <input value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
-            placeholder="e.g. Nightly Bug Scan"
-            className="w-full bg-muted/30 border border-border rounded-lg px-3 py-2.5 text-[13px] text-foreground placeholder:text-muted-foreground/40 outline-none focus:ring-1 focus:ring-primary/40" />
-        </div>
-        <div>
-          <label className={cn(TEXT.label, 'block mb-1.5')}>Company</label>
-          <select value={form.paperclip_company_id}
-            onChange={e => setForm(f => ({ ...f, paperclip_company_id: e.target.value, paperclip_agent_id: '' }))}
-            className="w-full bg-muted/30 border border-border rounded-lg px-3 py-2.5 text-[13px] text-foreground outline-none">
-            {companies.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-          </select>
-        </div>
-        <div>
-          <label className={cn(TEXT.label, 'block mb-1.5')}>Agent</label>
-          <select value={form.paperclip_agent_id} onChange={e => setForm(f => ({ ...f, paperclip_agent_id: e.target.value }))}
-            className="w-full bg-muted/30 border border-border rounded-lg px-3 py-2.5 text-[13px] text-foreground outline-none">
-            <option value="">— Select agent —</option>
-            {filteredAgents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
-          </select>
-        </div>
-        <div>
-          <label className={cn(TEXT.label, 'block mb-1.5')}>Skill (optional)</label>
-          <select value={form.skill_slug} onChange={e => setForm(f => ({ ...f, skill_slug: e.target.value }))}
-            className="w-full bg-muted/30 border border-border rounded-lg px-3 py-2.5 text-[13px] text-foreground outline-none">
-            <option value="">— Any skill —</option>
-            {filteredSkills.map(s => <option key={s.slug} value={s.slug}>{s.name}</option>)}
-          </select>
-        </div>
-        <div>
-          <label className={cn(TEXT.label, 'block mb-1.5')}>Schedule (cron)</label>
-          <div className="flex gap-2">
-            <input value={form.schedule} onChange={e => setForm(f => ({ ...f, schedule: e.target.value }))}
-              placeholder="0 2 * * *" className="flex-1 bg-muted/30 border border-border rounded-lg px-3 py-2.5 text-[13px] font-mono text-foreground outline-none focus:ring-1 focus:ring-primary/40" />
+    <div className={cn('border-b border-border/40 last:border-0 transition-colors', routine.enabled ? '' : 'opacity-60')}>
+      <div className="flex items-center gap-4 px-5 py-4 hover:bg-muted/10">
+        {/* Expand toggle */}
+        <button onClick={handleExpand} className="text-muted-foreground/40 hover:text-muted-foreground transition-colors flex-shrink-0">
+          {expanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+        </button>
+
+        {/* Name + meta */}
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2.5 mb-0.5">
+            <span className="text-[13px] font-semibold text-card-foreground truncate">{routine.name}</span>
+            <code className="text-[10px] text-muted-foreground bg-muted px-1.5 py-0.5 rounded font-mono flex-shrink-0">
+              {routine.cron_expression}
+            </code>
+          </div>
+          <div className="flex items-center gap-3 text-[11px] text-muted-foreground flex-wrap">
+            {routine.agent_name && (
+              <span className="flex items-center gap-1">
+                <Bot className="w-3 h-3" /> {routine.agent_name}
+              </span>
+            )}
+            {routine.company_name && (
+              <span className="flex items-center gap-1">
+                <Building2 className="w-3 h-3" /> {routine.company_name}
+              </span>
+            )}
+            {routine.skill_slug && (
+              <span className="flex items-center gap-1">
+                <Zap className="w-3 h-3" /> {routine.skill_slug}
+              </span>
+            )}
           </div>
         </div>
-        <div className="col-span-3">
-          <label className={cn(TEXT.label, 'block mb-2')}>Quick presets</label>
-          <div className="flex flex-wrap gap-1.5">
-            {CRON_PRESETS.map(p => (
-              <button key={p.value} onClick={() => setForm(f => ({ ...f, schedule: p.value }))}
-                className={cn('px-2.5 py-1 rounded-md text-[11px] border transition-all',
-                  form.schedule === p.value
-                    ? 'bg-primary/10 border-primary/30 text-primary'
-                    : 'bg-muted/20 border-border text-muted-foreground hover:border-border/80')}>
-                {p.label}
-                <span className="font-mono ml-1 opacity-60">{p.value}</span>
-              </button>
-            ))}
+
+        {/* Stats */}
+        <div className="hidden md:flex items-center gap-6 text-[12px] text-muted-foreground flex-shrink-0">
+          <div className="text-right">
+            <div className="text-[10px] text-muted-foreground/50 mb-0.5">Last run</div>
+            <div>{fmtRelative(routine.last_run_at)}</div>
+          </div>
+          <div className="text-right">
+            <div className="text-[10px] text-muted-foreground/50 mb-0.5">Avg</div>
+            <div className="flex items-center gap-1"><Timer className="w-3 h-3" />{fmtDuration(routine.avg_duration_sec)}</div>
+          </div>
+          <div className="text-right">
+            <div className="text-[10px] text-muted-foreground/50 mb-0.5">Runs</div>
+            <div>{routine.run_count ?? 0}</div>
           </div>
         </div>
-        {err && <div className="col-span-3 text-[12px] text-destructive">{err}</div>}
-        <div className="col-span-3 flex justify-end gap-3 pt-1">
-          <button onClick={onClose} className="px-4 py-2 text-[13px] border border-border rounded-lg text-muted-foreground hover:bg-muted transition-colors">Cancel</button>
-          <button onClick={submit} disabled={saving || !form.name.trim()}
-            className="flex items-center gap-2 px-5 py-2 text-[13px] font-semibold bg-primary/90 hover:bg-primary text-white rounded-lg transition-colors disabled:opacity-50">
-            {saving ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <CalendarClock className="w-3.5 h-3.5" />}
-            Create Routine
+
+        {/* Status + actions */}
+        <div className="flex items-center gap-3 flex-shrink-0">
+          <StatusBadge status={routine.last_status} />
+
+          <button onClick={handleRun} disabled={running}
+            title="Run now"
+            className="p-1.5 rounded-lg border border-border bg-card hover:bg-primary/10 hover:border-primary/30 hover:text-primary text-muted-foreground transition-all disabled:opacity-40">
+            {running ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
+          </button>
+
+          <button onClick={handleToggle} disabled={toggling}
+            title={routine.enabled ? 'Disable' : 'Enable'}
+            className="transition-colors disabled:opacity-40">
+            {routine.enabled
+              ? <ToggleRight className="w-5 h-5 text-primary" />
+              : <ToggleLeft className="w-5 h-5 text-muted-foreground/40" />}
           </button>
         </div>
       </div>
+
+      {/* Run history panel */}
+      {expanded && (
+        <div className="px-10 pb-4">
+          {loadingRuns ? (
+            <div className="py-3 text-center"><RefreshCw className="w-4 h-4 animate-spin mx-auto text-muted-foreground/30" /></div>
+          ) : runs.length === 0 ? (
+            <div className="text-[12px] text-muted-foreground py-3">No run history yet.</div>
+          ) : (
+            <div className="space-y-1">
+              {runs.map(r => (
+                <div key={r.id} className="flex items-start gap-3 py-1.5 border-b border-border/20 last:border-0">
+                  <span className={cn('text-[10px] font-semibold px-1.5 py-0.5 rounded flex-shrink-0 mt-0.5',
+                    r.status === 'success' ? 'bg-success/10 text-success'
+                    : r.status === 'failed' ? 'bg-destructive/10 text-destructive'
+                    : 'bg-warning/10 text-warning'
+                  )}>{r.status}</span>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-3 text-[11px] text-muted-foreground">
+                      <span>{fmtRelative(r.started_at)}</span>
+                      {r.duration_sec != null && <span className="flex items-center gap-1"><Timer className="w-3 h-3" />{fmtDuration(r.duration_sec)}</span>}
+                    </div>
+                    {r.error && <div className="text-[11px] text-destructive mt-1 font-mono truncate">{r.error}</div>}
+                    {r.output && !r.error && <div className="text-[11px] text-muted-foreground mt-1 font-mono truncate">{r.output}</div>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -189,84 +245,77 @@ function AddRoutineForm({
 // ══════════════════════════════════════════════════════════════════════════
 export default function RoutinesPage() {
   const [routines, setRoutines] = useState<Routine[]>([]);
-  const [agents, setAgents]     = useState<VpsAgent[]>([]);
-  const [skills, setSkills]     = useState<VpsSkill[]>([]);
-  const [companies, setCompanies] = useState<VpsCompany[]>([]);
   const [loading, setLoading]   = useState(true);
   const [err, setErr]           = useState<string | null>(null);
-  const [showAdd, setShowAdd]   = useState(false);
-  const [running, setRunning]   = useState<string | null>(null);
-  const [expandedRun, setExpandedRun] = useState<string | null>(null);
+  const [filter, setFilter]     = useState<'all' | 'enabled' | 'disabled'>('all');
 
   const fetchAll = useCallback(async () => {
     setLoading(true); setErr(null);
     try {
-      const [rRes, aRes, sRes, cRes] = await Promise.all([
-        fetch(`${API}/api/routines`, { headers: AUTH }),
-        fetch(`${API}/api/control/agents`, { headers: AUTH }),
-        fetch(`${API}/api/control/skills`, { headers: AUTH }),
-        fetch(`${API}/api/control/companies`, { headers: AUTH }),
-      ]);
-      setRoutines(await safeArr(rRes));
-      setAgents(await safeArr(aRes));
-      setSkills(await safeArr(sRes));
-      setCompanies(await safeArr(cRes));
+      const res = await fetch(`${API}/api/control/routines`, { headers: AUTH });
+      const data = await safeArr(res);
+      setRoutines(data);
     } catch (e: any) { setErr(e.message); }
     finally { setLoading(false); }
   }, []);
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
 
-  const handleAdd = async (data: any) => {
-    const res = await fetch(`${API}/api/routines`, { method: 'POST', headers: AUTH, body: JSON.stringify(data) });
-    if (!res.ok) { const j = await res.json(); throw new Error(j.error); }
-    await fetchAll();
-  };
-
-  const handleToggle = async (id: string, enabled: number) => {
-    await fetch(`${API}/api/routines/${id}/toggle`, {
-      method: 'PATCH', headers: AUTH, body: JSON.stringify({ enabled: !enabled }),
+  const handleToggle = async (id: string, enabled: boolean) => {
+    await fetch(`${API}/api/control/routines/${id}/toggle`, {
+      method: 'PATCH', headers: AUTH,
+      body: JSON.stringify({ enabled }),
     });
-    setRoutines(prev => prev.map(r => r.id === id ? { ...r, enabled: enabled ? 0 : 1 } : r));
+    setRoutines(prev => prev.map(r => r.id === id ? { ...r, enabled } : r));
   };
 
-  const handleRunNow = async (id: string) => {
-    setRunning(id);
-    await fetch(`${API}/api/routines/${id}/run`, { method: 'POST', headers: AUTH });
-    setTimeout(() => { setRunning(null); fetchAll(); }, 2000);
+  const handleRun = async (id: string) => {
+    await fetch(`${API}/api/control/routines/${id}/run`, { method: 'POST', headers: AUTH });
+    // Refresh after 1s to pick up run_count update
+    setTimeout(fetchAll, 1500);
   };
 
-  const handleDelete = async (id: string) => {
-    if (!confirm('Delete this routine?')) return;
-    await fetch(`${API}/api/routines/${id}`, { method: 'DELETE', headers: AUTH });
-    setRoutines(prev => prev.filter(r => r.id !== id));
-  };
+  const filtered = routines.filter(r =>
+    filter === 'all' ? true : filter === 'enabled' ? r.enabled : !r.enabled
+  );
 
-  const active = routines.filter(r => r.enabled).length;
+  const enabledCount  = routines.filter(r => r.enabled).length;
+  const successCount  = routines.filter(r => r.last_status === 'success').length;
+  const failedCount   = routines.filter(r => r.last_status === 'failed').length;
+  const totalRuns     = routines.reduce((a, r) => a + (r.run_count ?? 0), 0);
+
+  // Group by company
+  const byCompany = new Map<string, Routine[]>();
+  for (const r of filtered) {
+    const key = r.company_name ?? 'Unknown';
+    const arr = byCompany.get(key) ?? [];
+    arr.push(r);
+    byCompany.set(key, arr);
+  }
 
   const sidebar = (
     <div className={LAYOUT.rightSidebar}>
-      <SidebarSection title="Overview">
+      <SidebarSection title="Stats">
         <SidebarRow label="Total"    value={routines.length} />
-        <SidebarRow label="Active"   value={active}          valueClass="text-success" />
-        <SidebarRow label="Paused"   value={routines.length - active} />
-        <SidebarRow label="Total runs" value={routines.reduce((a, r) => a + r.run_count, 0)} />
+        <SidebarRow label="Enabled"  value={enabledCount} valueClass="text-primary" />
+        <SidebarRow label="Total runs" value={totalRuns} />
+        <SidebarRow label="Success"  value={successCount} valueClass="text-success" />
+        <SidebarRow label="Failed"   value={failedCount}  valueClass="text-destructive" />
       </SidebarSection>
       <SidebarDivider />
-      <SidebarSection title="Cron Guide">
-        <div className="space-y-1.5">
-          {CRON_PRESETS.map(p => (
-            <div key={p.value} className="flex gap-2 text-[11px]">
-              <span className="font-mono text-primary/70 w-28 flex-shrink-0">{p.value}</span>
-              <span className="text-muted-foreground">{p.label}</span>
-            </div>
-          ))}
-        </div>
+      <SidebarSection title="Filter">
+        {(['all', 'enabled', 'disabled'] as const).map(f => (
+          <button key={f} onClick={() => setFilter(f)}
+            className={cn('w-full text-left text-[12px] px-2 py-1.5 rounded-lg capitalize transition-colors',
+              filter === f ? 'bg-primary/10 text-primary font-semibold' : 'text-muted-foreground hover:bg-muted/50')}>
+            {f === 'all' ? `All (${routines.length})` : f === 'enabled' ? `Enabled (${enabledCount})` : `Disabled (${routines.length - enabledCount})`}
+          </button>
+        ))}
       </SidebarSection>
       <SidebarDivider />
-      <SidebarSection title="Powered by">
-        <div className="p-3 rounded-lg bg-muted/30 border border-border text-[11px] text-muted-foreground leading-relaxed">
-          Routines run as <span className="text-foreground font-semibold">Convex cron functions</span>. Each trigger fires the assigned agent skill on the VPS.
+      <SidebarSection title="Source">
+        <div className="text-[11px] text-muted-foreground leading-relaxed">
+          Routines are read directly from the <strong className="text-foreground">Paperclip VPS</strong> <code className="bg-muted px-1 rounded">scheduled_jobs</code> table. Toggle and Run actions write back to the VPS.
         </div>
       </SidebarSection>
     </div>
@@ -276,117 +325,69 @@ export default function RoutinesPage() {
     <PageLayout sidebar={sidebar}>
       <PageHeader
         title="Routines"
-        subtitle="Scheduled agent runs · Convex-cron-powered"
+        subtitle="Scheduled agent jobs from Paperclip VPS · real-time status · run history"
         badge={
-          <div className="flex items-center gap-2">
-            <button onClick={fetchAll} disabled={loading}
-              className="p-2 rounded-lg border border-border bg-card hover:bg-muted transition-colors disabled:opacity-40">
-              <RefreshCw className={cn('w-4 h-4 text-muted-foreground', loading && 'animate-spin')} />
-            </button>
-            <button onClick={() => setShowAdd(v => !v)}
-              className="flex items-center gap-2 px-4 py-2 text-[13px] font-semibold rounded-lg bg-primary/90 hover:bg-primary text-white transition-colors">
-              <Plus className="w-3.5 h-3.5" /> New Routine
-            </button>
-          </div>
+          <button onClick={fetchAll} disabled={loading}
+            className="p-2 rounded-lg border border-border bg-card hover:bg-muted transition-colors disabled:opacity-40">
+            <RefreshCw className={cn('w-4 h-4 text-muted-foreground', loading && 'animate-spin')} />
+          </button>
         }
       />
       <PageBody>
         <StatGrid cols={4}>
-          <StatCard label="Routines"   value={routines.length} sub="scheduled"   icon={CalendarClock} color="text-primary"          ring="primary"  />
-          <StatCard label="Active"     value={active}          sub="running"     icon={Activity}      color="text-success"          ring="success"  />
-          <StatCard label="Total Runs" value={routines.reduce((a, r) => a + r.run_count, 0)} sub="all time" icon={CheckCircle} color="text-warning" ring="warning" />
-          <StatCard label="Agents"     value={agents.length}   sub="from VPS"    icon={Bot}           color="text-muted-foreground" ring="muted"    />
+          <StatCard label="Scheduled Jobs" value={routines.length}  sub="from VPS"         icon={CalendarClock} color="text-primary"     ring="primary"  />
+          <StatCard label="Enabled"         value={enabledCount}     sub="active schedules"  icon={ToggleRight}   color="text-success"     ring="success"  />
+          <StatCard label="Total Runs"      value={totalRuns}        sub="all time"          icon={Activity}      color="text-chart-2"     ring="chart2"   />
+          <StatCard label="Failed"          value={failedCount}      sub="last status"       icon={AlertTriangle} color="text-destructive" ring="destructive"    />
         </StatGrid>
 
-        {showAdd && (
-          <AddRoutineForm agents={agents} skills={skills} companies={companies}
-            onAdd={handleAdd} onClose={() => setShowAdd(false)} />
-        )}
-
         {err && (
-          <div className="flex items-center gap-3 p-4 rounded-xl border border-destructive/15 bg-destructive/5">
-            <AlertTriangle className="w-4 h-4 text-destructive flex-shrink-0" />
-            <span className="text-[13px] text-destructive">{err}</span>
+          <div className="flex items-center gap-3 p-4 rounded-xl border border-warning/20 bg-warning/5">
+            <AlertTriangle className="w-4 h-4 text-warning" />
+            <div>
+              <div className="text-[13px] font-medium text-warning">VPS unavailable</div>
+              <div className="text-[11px] text-muted-foreground mt-0.5">{err} — routines will appear when VPS SSH is connected.</div>
+            </div>
           </div>
         )}
 
+        {/* Routines by company */}
         {loading ? (
-          <div className="py-16 text-center">
-            <RefreshCw className="w-6 h-6 animate-spin mx-auto mb-3 text-muted-foreground/30" />
-            <div className="text-[13px] text-muted-foreground">Loading routines…</div>
+          <div className="py-12 text-center">
+            <RefreshCw className="w-5 h-5 animate-spin mx-auto text-muted-foreground/30" />
+            <div className="text-[12px] text-muted-foreground/50 mt-2">Loading from VPS…</div>
           </div>
-        ) : routines.length === 0 ? (
-          <EmptyState icon={CalendarClock} title="No routines yet" description="Schedule your first agent run to automate recurring tasks." />
+        ) : filtered.length === 0 ? (
+          <EmptyState
+            icon={CalendarClock}
+            title={routines.length === 0 ? "No scheduled jobs found" : "No routines match filter"}
+            description={routines.length === 0
+              ? "Scheduled jobs are managed in Paperclip. Once the VPS is connected, they appear here."
+              : "Try selecting a different filter."}
+          />
         ) : (
-          <div className={CARD.table}>
-            <table className="w-full border-collapse">
-              <thead>
-                <tr className="border-b border-border">
-                  {['Routine', 'Agent', 'Schedule', 'Last Run', 'Avg', 'Runs', ''].map(h => (
-                    <th key={h} className="text-left px-5 py-3.5 text-[11px] font-semibold text-muted-foreground uppercase tracking-[0.06em] bg-muted/30">{h}</th>
+          <div className="space-y-6">
+            {Array.from(byCompany.entries()).map(([company, rows]) => (
+              <div key={company}>
+                <div className="flex items-center gap-2 mb-2">
+                  <Building2 className="w-3.5 h-3.5 text-muted-foreground/50" />
+                  <h2 className={cn(TEXT.sectionTitle)}>{company}</h2>
+                  <span className="text-[11px] text-muted-foreground">({rows.length})</span>
+                </div>
+                <div className={CARD.table}>
+                  <div className="px-5 py-2.5 border-b border-border bg-muted/20">
+                    <div className="grid grid-cols-[auto_1fr_auto] gap-4 text-[10px] font-semibold text-muted-foreground uppercase tracking-[0.07em]">
+                      <span />
+                      <span>Job</span>
+                      <span className="text-right">Status / Actions</span>
+                    </div>
+                  </div>
+                  {rows.map(r => (
+                    <RoutineRow key={r.id} routine={r} onToggle={handleToggle} onRun={handleRun} />
                   ))}
-                </tr>
-              </thead>
-              <tbody>
-                {routines.map(r => {
-                  const agent = agents.find(a => a.id === r.paperclip_agent_id);
-                  const company = companies.find(c => c.id === r.paperclip_company_id);
-                  return (
-                    <tr key={r.id} className={cn('border-b border-border/40 last:border-0 transition-colors', r.enabled ? 'hover:bg-muted/20' : 'opacity-50 hover:bg-muted/10')}>
-                      <td className="px-5 py-4">
-                        <div className="text-[14px] font-semibold text-card-foreground">{r.name}</div>
-                        <div className="text-[11px] text-muted-foreground mt-0.5">{company?.name ?? r.paperclip_company_id}</div>
-                      </td>
-                      <td className="px-5 py-4">
-                        <div className="flex items-center gap-1.5 text-[13px] text-foreground">
-                          <Bot className="w-3.5 h-3.5 text-muted-foreground" />
-                          {agent?.name ?? <span className="text-muted-foreground/50 text-[11px]">{r.paperclip_agent_id.slice(0, 8)}…</span>}
-                        </div>
-                        {r.skill_slug && (
-                          <span className="font-mono text-[10px] text-muted-foreground bg-muted px-1.5 py-0.5 rounded mt-1 inline-block">{r.skill_slug}</span>
-                        )}
-                      </td>
-                      <td className="px-5 py-4">
-                        <div className="font-mono text-[12px] text-foreground">{r.schedule}</div>
-                      </td>
-                      <td className="px-5 py-4">
-                        <div className="text-[13px] text-foreground">{fmtRelative(r.last_run_at)}</div>
-                        {r.last_status && (
-                          <div className={cn('flex items-center gap-1 text-[11px] mt-0.5',
-                            r.last_status === 'success' ? 'text-success' : 'text-destructive')}>
-                            {r.last_status === 'success'
-                              ? <CheckCircle className="w-3 h-3" />
-                              : <AlertTriangle className="w-3 h-3" />}
-                            {r.last_status}
-                          </div>
-                        )}
-                      </td>
-                      <td className="px-5 py-4 text-[13px] text-foreground tabular-nums">{fmtDuration(r.avg_duration_sec)}</td>
-                      <td className="px-5 py-4 text-[13px] text-foreground tabular-nums">{r.run_count}</td>
-                      <td className="px-5 py-4">
-                        <div className="flex items-center gap-2">
-                          <button onClick={() => handleRunNow(r.id)} disabled={!r.enabled || running === r.id}
-                            className="flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-medium border border-border rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-colors disabled:opacity-40">
-                            {running === r.id ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
-                            Run
-                          </button>
-                          <button onClick={() => handleToggle(r.id, r.enabled)}
-                            className="transition-colors">
-                            {r.enabled
-                              ? <ToggleRight className="w-6 h-6 text-success" />
-                              : <ToggleLeft  className="w-6 h-6 text-muted-foreground/40" />}
-                          </button>
-                          <button onClick={() => handleDelete(r.id)}
-                            className="p-1 rounded hover:bg-destructive/10 text-muted-foreground/30 hover:text-destructive transition-colors">
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                </div>
+              </div>
+            ))}
           </div>
         )}
       </PageBody>

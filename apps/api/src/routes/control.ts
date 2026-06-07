@@ -298,7 +298,133 @@ export const controlRoutes: FastifyPluginAsync = async (app) => {
   });
 
   // =============================================================================
+  // Routines — read/manage from Paperclip VPS scheduled_jobs table
+  // =============================================================================
+
+  /**
+   * GET /api/control/routines
+   * List all scheduled jobs on the VPS with their last run status
+   */
+  app.get('/routines', async (_req, reply) => {
+    try {
+      const result = await vpsQuery<any>(`
+        const rows = await sql\`
+          SELECT
+            sj.id,
+            sj.name,
+            sj.cron_expression,
+            sj.enabled,
+            sj.agent_id,
+            sj.skill_slug,
+            sj.company_id,
+            sj.last_run_at,
+            sj.last_status,
+            sj.run_count,
+            sj.avg_duration_sec,
+            a.name as agent_name,
+            a.adapter_type,
+            c.name as company_name,
+            c.issue_prefix
+          FROM scheduled_jobs sj
+          LEFT JOIN agents a ON a.id = sj.agent_id
+          LEFT JOIN companies c ON c.id = sj.company_id
+          ORDER BY c.name, sj.name
+        \`;
+        return rows;
+      `);
+      return reply.send(result);
+    } catch (err: any) {
+      return reply.status(503).send({ error: 'VPS query failed', detail: err.message });
+    }
+  });
+
+  /**
+   * GET /api/control/routines/:id/runs
+   * Run history for a specific scheduled job
+   */
+  app.get<{ Params: { id: string } }>('/routines/:id/runs', async (req, reply) => {
+    try {
+      const result = await vpsQuery<any>(`
+        const rows = await sql\`
+          SELECT
+            jr.id,
+            jr.scheduled_job_id,
+            jr.started_at,
+            jr.finished_at,
+            jr.status,
+            jr.duration_sec,
+            SUBSTRING(jr.output, 1, 500) as output,
+            SUBSTRING(jr.error, 1, 500) as error
+          FROM job_runs jr
+          WHERE jr.scheduled_job_id = '${req.params.id}'
+          ORDER BY jr.started_at DESC
+          LIMIT 20
+        \`;
+        return rows;
+      `);
+      return reply.send(result);
+    } catch (err: any) {
+      return reply.status(503).send({ error: 'VPS query failed', detail: err.message });
+    }
+  });
+
+  /**
+   * PATCH /api/control/routines/:id/toggle
+   * Enable or disable a scheduled job
+   */
+  app.patch<{ Params: { id: string }; Body: { enabled: boolean } }>(
+    '/routines/:id/toggle', async (req, reply) => {
+      try {
+        const result = await vpsExec(`
+          const row = await sql\`
+            UPDATE scheduled_jobs
+            SET enabled = ${req.body.enabled}, updated_at = NOW()
+            WHERE id = '${req.params.id}'
+            RETURNING id, name, enabled
+          \`;
+          return row[0] ?? null;
+        `);
+        return reply.send(result);
+      } catch (err: any) {
+        return reply.status(503).send({ error: 'Toggle failed', detail: err.message });
+      }
+    }
+  );
+
+  /**
+   * POST /api/control/routines/:id/run
+   * Manually trigger a scheduled job immediately
+   */
+  app.post<{ Params: { id: string } }>('/routines/:id/run', async (req, reply) => {
+    try {
+      const result = await vpsExec(`
+        // Create a manual run record
+        const job = await sql\`SELECT * FROM scheduled_jobs WHERE id = '${req.params.id}' LIMIT 1\`;
+        if (!job.length) return { error: 'Job not found' };
+
+        const run = await sql\`
+          INSERT INTO job_runs (scheduled_job_id, started_at, status)
+          VALUES ('${req.params.id}', NOW(), 'triggered')
+          RETURNING id, started_at
+        \`;
+
+        // Update last_run_at
+        await sql\`
+          UPDATE scheduled_jobs SET last_run_at = NOW(), run_count = run_count + 1
+          WHERE id = '${req.params.id}'
+        \`;
+
+        return { triggered: true, run_id: run[0].id, job_name: job[0].name };
+      `);
+      return reply.status(202).send(result);
+    } catch (err: any) {
+      return reply.status(503).send({ error: 'Trigger failed', detail: err.message });
+    }
+  });
+
+  // =============================================================================
   // Skills
+
   // =============================================================================
 
   /**
