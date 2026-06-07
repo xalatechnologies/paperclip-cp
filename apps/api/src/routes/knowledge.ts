@@ -1,42 +1,29 @@
 /**
- * Knowledge Routes — /api/knowledge
+ * Knowledge Base Routes — /api/knowledge
  *
- * RAG document store: collections, documents, semantic search stub.
- * Collections are bound to Paperclip agents — their contents are
- * injected into the agent context window at run time.
+ * Real RAG pipeline:
+ *  Upload → chunk (512-tok sliding) → embed (text-embedding-3-small) → store
+ *  Search  → embed query → cosine similarity → top-k chunks with snippets
  */
 
 import type { FastifyPluginAsync } from 'fastify';
-import { knowledgeDb } from '../db.js';
-
-// Chunk a text into ~512-token segments (sliding window, 10% overlap)
-function chunkText(text: string, chunkTokens = 512): string[] {
-  const words = text.split(/\s+/);
-  const chunkWords = chunkTokens * 4; // ~4 chars per token ≈ 1 word per token (conservative)
-  const overlap = Math.floor(chunkWords * 0.1);
-  const chunks: string[] = [];
-  let i = 0;
-  while (i < words.length) {
-    chunks.push(words.slice(i, i + chunkWords).join(' '));
-    i += chunkWords - overlap;
-  }
-  return chunks.filter(c => c.trim().length > 0);
-}
+import { knowledgeDb, chunksDb } from '../db.js';
+import {
+  splitChunks, embedBatch, embedText,
+  float32ToBuffer, bufferToFloat32,
+  searchChunks, estimateTokens, EMBEDDING_ENABLED,
+} from '../embeddings.js';
 
 export const knowledgeRoutes: FastifyPluginAsync = async (app) => {
 
-  // ── Collections ───────────────────────────────────────────────────────────
+  // ── Collections ────────────────────────────────────────────────────────────
 
-  app.get<{ Querystring: { company_id?: string } }>('/collections', async (req, reply) => {
-    const rows = req.query.company_id
-      ? knowledgeDb.listByCompany.all(req.query.company_id)
-      : knowledgeDb.listCollections.all();
-    // Parse bound_agent_ids JSON
-    const parsed = (rows as any[]).map(r => ({
-      ...r,
-      bound_agent_ids: JSON.parse(r.bound_agent_ids ?? '[]'),
-    }));
-    return reply.send(parsed);
+  app.get('/', async (_req, reply) => {
+    const cols = knowledgeDb.listCollections.all() as any[];
+    return reply.send(cols.map(c => ({
+      ...c,
+      bound_agent_ids: JSON.parse(c.bound_agent_ids ?? '[]'),
+    })));
   });
 
   app.post<{
@@ -48,10 +35,10 @@ export const knowledgeRoutes: FastifyPluginAsync = async (app) => {
       chunk_strategy?: string;
       bound_agent_ids?: string[];
     };
-  }>('/collections', async (req, reply) => {
+  }>('/', async (req, reply) => {
     const { name, paperclip_company_id, description, embedding_model, chunk_strategy, bound_agent_ids } = req.body;
     if (!name || !paperclip_company_id) {
-      return reply.status(400).send({ error: 'name and company_id required' });
+      return reply.status(400).send({ error: 'name and paperclip_company_id required' });
     }
     const col = knowledgeDb.insertCollection.get({
       name, paperclip_company_id,
@@ -63,158 +50,168 @@ export const knowledgeRoutes: FastifyPluginAsync = async (app) => {
     return reply.status(201).send({ ...col, bound_agent_ids: JSON.parse(col.bound_agent_ids ?? '[]') });
   });
 
-  // Bind agents to a collection
-  app.patch<{
-    Params: { id: string };
-    Body: { bound_agent_ids: string[] };
-  }>('/collections/:id/bind', async (req, reply) => {
-    const col = knowledgeDb.getCollection.get(req.params.id);
-    if (!col) return reply.status(404).send({ error: 'Collection not found' });
-    knowledgeDb.bindAgents.run({
-      id: req.params.id,
-      bound_agent_ids: JSON.stringify(req.body.bound_agent_ids ?? []),
-    });
-    return reply.send({ id: req.params.id, bound_agent_ids: req.body.bound_agent_ids });
-  });
-
-  app.delete<{ Params: { id: string } }>('/collections/:id', async (req, reply) => {
+  app.delete<{ Params: { id: string } }>('/:id', async (req, reply) => {
     knowledgeDb.deleteCollection.run(req.params.id);
     return reply.send({ deleted: true });
   });
 
   // ── Documents ─────────────────────────────────────────────────────────────
 
-  app.get<{ Params: { colId: string } }>('/collections/:colId/documents', async (req, reply) => {
-    const docs = knowledgeDb.listDocuments.all(req.params.colId);
-    return reply.send(docs);
+  app.get<{ Params: { id: string } }>('/:id/documents', async (req, reply) => {
+    const docs = knowledgeDb.listDocuments.all(req.params.id) as any[];
+    return reply.send(docs.map(d => ({ ...d, content: undefined }))); // don't return raw content
   });
 
+  /**
+   * POST /:id/documents
+   * Upload a document → chunk it → generate embeddings → store
+   */
   app.post<{
-    Params: { colId: string };
-    Body: {
-      name: string;
-      file_type?: string;
-      content: string;
-    };
-  }>('/collections/:colId/documents', async (req, reply) => {
-    const { name, file_type, content } = req.body;
-    if (!name || !content) {
-      return reply.status(400).send({ error: 'name and content required' });
-    }
+    Params: { id: string };
+    Body: { name: string; file_type?: string; content: string; collection_id?: string };
+  }>('/:id/documents', async (req, reply) => {
+    const collectionId = req.params.id;
+    const { name, file_type = 'text', content } = req.body;
+    if (!name || !content) return reply.status(400).send({ error: 'name and content required' });
 
-    // Chunk the document
-    const chunks = chunkText(content);
+    // 1. Store document
     const doc = knowledgeDb.insertDocument.get({
-      collection_id: req.params.colId,
+      collection_id: collectionId,
       name,
-      file_type: file_type ?? 'text',
+      file_type,
       content,
-      chunk_count: chunks.length,
+      chunk_count: 0,
       size_bytes: Buffer.byteLength(content, 'utf8'),
     }) as any;
 
-    // Update collection totals
-    const col = knowledgeDb.getCollection.get(req.params.colId) as any;
-    if (col) {
-      const docs = knowledgeDb.listDocuments.all(req.params.colId) as any[];
-      knowledgeDb.updateCollectionMeta.run({
-        id: req.params.colId,
-        doc_count: docs.length,
-        chunk_count: docs.reduce((a, d) => a + d.chunk_count, 0),
-        status: 'ready',
+    // 2. Split into chunks
+    const rawChunks = splitChunks(content);
+
+    // 3. Embed all chunks in one batch call
+    const embeddings = await embedBatch(rawChunks);
+
+    // 4. Store chunks with embeddings
+    const insertChunk = chunksDb.insertChunk;
+    for (let i = 0; i < rawChunks.length; i++) {
+      const chunkText = rawChunks[i];
+      const vec = embeddings[i];
+      insertChunk.run({
+        document_id: doc.id,
+        collection_id: collectionId,
+        chunk_index: i,
+        content: chunkText,
+        token_count: estimateTokens(chunkText),
+        embedding: vec ? float32ToBuffer(vec) : null,
       });
     }
 
-    return reply.status(201).send(doc);
+    // 5. Update collection counts
+    const allDocs = knowledgeDb.listDocuments.all(collectionId) as any[];
+    const totalChunks = (chunksDb.countByCollection.get(collectionId) as any)?.count ?? 0;
+    knowledgeDb.updateCollectionMeta.run({
+      id: collectionId,
+      doc_count: allDocs.length,
+      chunk_count: totalChunks,
+      status: 'ready',
+    });
+
+    return reply.status(201).send({
+      ...doc,
+      chunk_count: rawChunks.length,
+      embedding_enabled: EMBEDDING_ENABLED(),
+    });
   });
 
-  app.delete<{ Params: { colId: string; docId: string } }>(
-    '/collections/:colId/documents/:docId', async (req, reply) => {
+  app.delete<{ Params: { id: string; docId: string } }>(
+    '/:id/documents/:docId', async (req, reply) => {
+      // Chunks cascade-delete via FK
+      chunksDb.deleteByDocument.run(req.params.docId);
       knowledgeDb.deleteDocument.run(req.params.docId);
-      // Recalculate totals
-      const docs = knowledgeDb.listDocuments.all(req.params.colId) as any[];
+
+      // Recount
+      const allDocs = knowledgeDb.listDocuments.all(req.params.id) as any[];
+      const totalChunks = (chunksDb.countByCollection.get(req.params.id) as any)?.count ?? 0;
       knowledgeDb.updateCollectionMeta.run({
-        id: req.params.colId,
-        doc_count: docs.length,
-        chunk_count: docs.reduce((a, d) => a + d.chunk_count, 0),
+        id: req.params.id,
+        doc_count: allDocs.length,
+        chunk_count: totalChunks,
         status: 'ready',
       });
       return reply.send({ deleted: true });
     }
   );
 
-  // ── Semantic search (text match stub — real embeddings need pgvector) ──────
+  // ── Semantic Search ────────────────────────────────────────────────────────
 
-  app.post<{ Body: { query: string; collection_id?: string; top_k?: number } }>(
-    '/search', async (req, reply) => {
-      const { query, collection_id, top_k = 5 } = req.body;
-      if (!query) return reply.status(400).send({ error: 'query required' });
+  /**
+   * POST /search
+   * Body: { query, collection_id?, top_k? }
+   * Embeds query → cosine similarity over chunks → returns top-k with snippets
+   */
+  app.post<{
+    Body: { query: string; collection_id?: string; top_k?: number };
+  }>('/search', async (req, reply) => {
+    const { query, collection_id, top_k = 5 } = req.body;
+    if (!query?.trim()) return reply.status(400).send({ error: 'query required' });
 
-      // Simple keyword search until pgvector embeddings are wired in
-      const allDocs = collection_id
-        ? knowledgeDb.listDocuments.all(collection_id) as any[]
-        : (knowledgeDb.listCollections.all() as any[]).flatMap(col =>
-            knowledgeDb.listDocuments.all(col.id) as any[]
-          );
-
-      const qLower = query.toLowerCase();
-      const results = allDocs
-        .filter(d => d.content.toLowerCase().includes(qLower))
-        .slice(0, top_k)
-        .map(d => ({
-          document_id: d.id,
-          document_name: d.name,
-          collection_id: d.collection_id,
-          snippet: d.content.slice(
-            Math.max(0, d.content.toLowerCase().indexOf(qLower) - 120),
-            d.content.toLowerCase().indexOf(qLower) + 300
-          ),
-          score: 1.0, // placeholder — will be cosine similarity when pgvector is connected
-        }));
-
-      return reply.send({
-        query,
-        results,
-        total: results.length,
-        note: 'Keyword search — pgvector cosine similarity available when VPS embedding pipeline is active',
-      });
+    // Load relevant chunks from SQLite
+    let rawChunks: any[];
+    if (collection_id) {
+      rawChunks = chunksDb.listByCollection.all(collection_id) as any[];
+    } else {
+      // Search across all collections
+      const cols = knowledgeDb.listCollections.all() as any[];
+      rawChunks = cols.flatMap(c =>
+        (chunksDb.listByCollection.all(c.id) as any[]).map(ch => ({ ...ch, collection_id: c.id }))
+      );
     }
-  );
 
-  // ── Context injection payload ──────────────────────────────────────────────
-  // Returns the formatted context blob to inject for a given agent (top-N chunks by relevance)
+    if (rawChunks.length === 0) {
+      return reply.send({ results: [], embedding_used: false, query });
+    }
 
-  app.get<{ Params: { agentId: string }; Querystring: { max_tokens?: string } }>(
-    '/inject/:agentId', async (req, reply) => {
-      const maxTokens = parseInt(req.query.max_tokens ?? '4000', 10);
+    // Semantic search (falls back to keyword if no API key)
+    const results = await searchChunks(query, rawChunks, top_k);
 
-      // Find all collections bound to this agent
-      const allCols = knowledgeDb.listCollections.all() as any[];
-      const boundCols = allCols.filter(c => {
-        const ids: string[] = JSON.parse(c.bound_agent_ids ?? '[]');
-        return ids.includes(req.params.agentId);
-      });
+    // Enrich with document + collection names
+    const allCols = knowledgeDb.listCollections.all() as any[];
+    const allDocs = (knowledgeDb.listCollections.all() as any[]).flatMap(c =>
+      (knowledgeDb.listDocuments.all(c.id) as any[]).map(d => ({ ...d, collection_name: c.name }))
+    );
 
-      let totalTokens = 0;
-      const sections: string[] = [];
+    const enriched = results.map(r => {
+      const doc = allDocs.find(d => d.id === r.document_id);
+      return {
+        chunk_id:        r.chunk_id,
+        document_id:     r.document_id,
+        document_name:   doc?.name ?? 'Unknown',
+        collection_name: doc?.collection_name ?? 'Unknown',
+        snippet:         r.content.length > 400 ? r.content.slice(0, 400) + '…' : r.content,
+        score:           Math.round(r.score * 1000) / 1000,
+        token_count:     r.token_count,
+      };
+    });
 
-      for (const col of boundCols) {
-        const docs = knowledgeDb.listDocuments.all(col.id) as any[];
-        for (const doc of docs) {
-          const docTokens = Math.ceil(doc.size_bytes / 4);
-          if (totalTokens + docTokens > maxTokens) break;
-          sections.push(`## ${col.name} / ${doc.name}\n${doc.content}`);
-          totalTokens += docTokens;
-        }
-      }
+    return reply.send({
+      results: enriched,
+      embedding_used: EMBEDDING_ENABLED(),
+      total_chunks_searched: rawChunks.length,
+      query,
+    });
+  });
 
-      return reply.send({
-        agent_id: req.params.agentId,
-        collection_count: boundCols.length,
-        total_tokens: totalTokens,
-        max_tokens: maxTokens,
-        context_block: sections.join('\n\n---\n\n'),
-      });
+  // ── Chunk inspection ──────────────────────────────────────────────────────
+
+  app.get<{ Params: { id: string; docId: string } }>(
+    '/:id/documents/:docId/chunks', async (req, reply) => {
+      const chunks = chunksDb.listByDocument.all(req.params.docId) as any[];
+      return reply.send(chunks.map(c => ({
+        id: c.id,
+        chunk_index: c.chunk_index,
+        token_count: c.token_count,
+        has_embedding: !!c.embedding,
+        snippet: c.content.slice(0, 120) + (c.content.length > 120 ? '…' : ''),
+      })));
     }
   );
 };

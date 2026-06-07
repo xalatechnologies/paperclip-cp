@@ -184,6 +184,24 @@ db.exec(`
     created_at           INTEGER NOT NULL DEFAULT (unixepoch()),
     updated_at           INTEGER NOT NULL DEFAULT (unixepoch())
   );
+
+  -- ── Knowledge Chunks (real RAG) ───────────────────────────────────────────
+  -- Each document is split into overlapping 512-token chunks.
+  -- Embeddings stored as raw IEEE-754 float32 blobs (1536 dims = 6144 bytes).
+
+  CREATE TABLE IF NOT EXISTS knowledge_chunks (
+    id            TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+    document_id   TEXT NOT NULL REFERENCES knowledge_documents(id) ON DELETE CASCADE,
+    collection_id TEXT NOT NULL,
+    chunk_index   INTEGER NOT NULL,
+    content       TEXT NOT NULL,
+    token_count   INTEGER NOT NULL DEFAULT 0,
+    embedding     BLOB,
+    created_at    INTEGER NOT NULL DEFAULT (unixepoch())
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_document ON knowledge_chunks(document_id);
+  CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_collection ON knowledge_chunks(collection_id);
 `);
 
 // ---------------------------------------------------------------------------
@@ -372,6 +390,11 @@ export const memoryDb = {
   `),
   delete: db.prepare(`DELETE FROM agent_memory WHERE id = ?`),
   purgeExpired: db.prepare(`DELETE FROM agent_memory WHERE expires_at IS NOT NULL AND expires_at <= unixepoch()`),
+  budgetByAgent: db.prepare(`
+    SELECT paperclip_agent_id, COUNT(*) as count, SUM(token_count) as tokens
+    FROM agent_memory WHERE expires_at IS NULL OR expires_at > unixepoch()
+    GROUP BY paperclip_agent_id
+  `),
 };
 
 // KNOWLEDGE
@@ -425,4 +448,18 @@ export const contextDb = {
     WHERE id = @id RETURNING *
   `),
   delete: db.prepare(`DELETE FROM context_rules WHERE id = ?`),
+};
+
+// KNOWLEDGE CHUNKS
+export const chunksDb = {
+  listByDocument: db.prepare(`SELECT id, chunk_index, content, token_count FROM knowledge_chunks WHERE document_id = ? ORDER BY chunk_index`),
+  listByCollection: db.prepare(`SELECT id, document_id, chunk_index, content, token_count, embedding FROM knowledge_chunks WHERE collection_id = ? ORDER BY document_id, chunk_index`),
+  insertChunk: db.prepare(`
+    INSERT INTO knowledge_chunks (document_id, collection_id, chunk_index, content, token_count, embedding)
+    VALUES (@document_id, @collection_id, @chunk_index, @content, @token_count, @embedding)
+    RETURNING id
+  `),
+  updateEmbedding: db.prepare(`UPDATE knowledge_chunks SET embedding = @embedding WHERE id = @id`),
+  deleteByDocument: db.prepare(`DELETE FROM knowledge_chunks WHERE document_id = ?`),
+  countByCollection: db.prepare(`SELECT COUNT(*) as count FROM knowledge_chunks WHERE collection_id = ?`),
 };

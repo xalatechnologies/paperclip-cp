@@ -34,6 +34,7 @@ import { memoryRoutes } from './routes/memory.js';
 import { knowledgeRoutes } from './routes/knowledge.js';
 import { contextRoutes } from './routes/context.js';
 import { authPlugin } from './plugins/auth.js';
+import { startCronExecutor } from './cron.js';
 
 const PORT = parseInt(process.env.API_PORT ?? '3001', 10);
 const IS_DEV = process.env.NODE_ENV !== 'production';
@@ -92,13 +93,14 @@ async function buildApp() {
     reply.status(404).send({ success: false, error: 'Route not found' });
   });
 
-  app.setErrorHandler((error, _req, reply) => {
+  app.setErrorHandler((error: any, _req, reply) => {
     app.log.error(error);
     reply.status(error.statusCode ?? 500).send({
       success: false,
       error: IS_DEV ? error.message : 'Internal server error',
     });
   });
+
 
   return app;
 }
@@ -107,14 +109,20 @@ async function main() {
   const app = await buildApp();
   await app.listen({ port: PORT, host: '0.0.0.0' });
 
+  // Start real cron executor — reads routines table and schedules all enabled routines
+  startCronExecutor();
+
   console.log(`\n🚀 PCC API       → http://localhost:${PORT}`);
   console.log(`🔀 Proxy         → ${process.env.PAPERCLIP_BASE_URL ?? '⚠  PAPERCLIP_BASE_URL not set'}`);
   console.log(`🗄  Database      → SQLite (.pcc/pcc.db)`);
+  console.log(`🕐 Cron          → Real cron executor active`);
+  console.log(`🧠 Embeddings    → ${process.env.OPENAI_API_KEY ? 'text-embedding-3-small (enabled)' : '⚠  OPENAI_API_KEY not set (keyword fallback)'}`);
   console.log(`📋 Health        → http://localhost:${PORT}/health`);
-  console.log(`\n   /api/paperclip/*  → Paperclip API proxy`);
-  console.log(`   /api/secrets       → Encrypted vault`);
-  console.log(`   /api/audit         → Audit trail`);
-  console.log(`   /api/notifications → Alert channels\n`);
+  console.log(`\n   /api/paperclip/*    → Paperclip API proxy`);
+  console.log(`   /api/secrets        → Encrypted vault`);
+  console.log(`   /api/audit          → Audit trail`);
+  console.log(`   /api/context/inject → System prompt builder`);
+  console.log(`   /api/context/distill→ Memory distillation\n`);
 }
 
 main().catch((err) => {

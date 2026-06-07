@@ -2,12 +2,14 @@
  * Routines Routes — /api/routines
  *
  * CRUD for scheduled agent runs. Toggle, run now, view run history.
- * Agents and skills are fetched from VPS via /api/control/*.
+ * On create/toggle/delete: calls refreshCrons() to re-sync the scheduler.
+ * On "run now": calls executeRoutine() from the cron executor (real agent trigger).
  */
 
 import type { FastifyPluginAsync } from 'fastify';
+import { validate as cronValidate } from 'node-cron';
 import { routinesDb, routineRunsDb } from '../db.js';
-import { vpsCommand } from '../vps-db.js';
+import { executeRoutine, refreshCrons } from '../cron.js';
 
 export const routinesRoutes: FastifyPluginAsync = async (app) => {
 
@@ -40,8 +42,7 @@ export const routinesRoutes: FastifyPluginAsync = async (app) => {
     if (!name || !paperclip_company_id || !paperclip_agent_id || !schedule) {
       return reply.status(400).send({ error: 'name, company_id, agent_id, schedule required' });
     }
-    // Validate cron-ish: 5 space-separated tokens
-    if (schedule.trim().split(/\s+/).length !== 5) {
+    if (!cronValidate(schedule)) {
       return reply.status(400).send({ error: 'schedule must be a valid 5-field cron expression' });
     }
     const routine = routinesDb.insert.get({
@@ -50,6 +51,8 @@ export const routinesRoutes: FastifyPluginAsync = async (app) => {
       schedule,
       enabled: enabled !== false ? 1 : 0,
     });
+    // Re-sync cron scheduler
+    refreshCrons();
     return reply.status(201).send(routine);
   });
 
@@ -61,56 +64,30 @@ export const routinesRoutes: FastifyPluginAsync = async (app) => {
     const routine = routinesDb.get.get(req.params.id);
     if (!routine) return reply.status(404).send({ error: 'Routine not found' });
     routinesDb.toggle.run({ id: req.params.id, enabled: req.body.enabled ? 1 : 0 });
+    // Re-sync cron scheduler
+    refreshCrons();
     return reply.send({ id: req.params.id, enabled: req.body.enabled });
   });
 
-  // Run now (manual trigger)
+  // Run now (manual trigger via cron executor)
   app.post<{ Params: { id: string } }>('/:id/run', async (req, reply) => {
     const routine = routinesDb.get.get(req.params.id) as any;
     if (!routine) return reply.status(404).send({ error: 'Routine not found' });
     if (!routine.enabled) return reply.status(400).send({ error: 'Routine is disabled' });
 
-    const runRow = routineRunsDb.insert.get(req.params.id) as any;
-    const runId = runRow.id;
-    const t0 = Date.now();
+    // Respond immediately — run is async
+    reply.status(202).send({ message: 'Run triggered', routine_id: req.params.id });
 
-    // Fire and forget — respond immediately so UI doesn't hang
-    reply.status(202).send({ run_id: runId, message: 'Run triggered' });
-
-    // Best-effort: execute via VPS SSH — just log the trigger
-    try {
-      const cmd = routine.skill_slug
-        ? `echo "[PCC] Triggered routine '${routine.name}' — skill: ${routine.skill_slug} — agent: ${routine.paperclip_agent_id}"`
-        : `echo "[PCC] Triggered routine '${routine.name}' — agent: ${routine.paperclip_agent_id}"`;
-      const { stdout, stderr } = await vpsCommand(cmd);
-      const durationSec = (Date.now() - t0) / 1000;
-      routineRunsDb.finish.run({
-        id: runId, status: 'success',
-        duration_sec: durationSec,
-        output: stdout || null,
-        error: stderr || null,
-      });
-      routinesDb.recordRun.run({
-        id: req.params.id, status: 'success',
-        error: null, duration: durationSec,
-      });
-    } catch (err: any) {
-      const durationSec = (Date.now() - t0) / 1000;
-      routineRunsDb.finish.run({
-        id: runId, status: 'failed',
-        duration_sec: durationSec, output: null,
-        error: err.message,
-      });
-      routinesDb.recordRun.run({
-        id: req.params.id, status: 'failed',
-        error: err.message, duration: durationSec,
-      });
-    }
+    // Execute via the real cron executor (fires Paperclip agent trigger)
+    executeRoutine(req.params.id).catch((err: Error) => {
+      console.error(`[routines] Manual run failed for ${req.params.id}:`, err.message);
+    });
   });
 
   // Delete routine
   app.delete<{ Params: { id: string } }>('/:id', async (req, reply) => {
     routinesDb.delete.run(req.params.id);
+    refreshCrons(); // Remove from scheduler
     return reply.send({ deleted: true });
   });
 
