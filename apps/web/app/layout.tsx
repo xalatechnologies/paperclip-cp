@@ -13,15 +13,11 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
-      <head>
-        <link rel="preconnect" href="https://fonts.googleapis.com" />
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
-      </head>
-      <body>
-        <div className="layout">
+    <html lang="en" className="h-full">
+      <body className="h-full">
+        <div className="flex h-full min-h-screen">
           <Sidebar />
-          <main className="main-content">
+          <main className="ml-[220px] flex-1 flex flex-col min-h-screen bg-background">
             {children}
           </main>
         </div>

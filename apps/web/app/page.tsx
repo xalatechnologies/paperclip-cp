@@ -1,296 +1,299 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
-import { Building2, Bot, AlertCircle, Activity, Zap, RefreshCw, ChevronRight } from 'lucide-react';
 import {
-  getCompanies, getAgentsByCompany, getSession,
-  statusVariant, fmtRelative, type Company, type Agent,
-} from '@/lib/api';
+  Building2, Bot, AlertCircle, Activity, Zap,
+  Shield, BookOpen, Heart, Target, ArrowUpRight,
+} from 'lucide-react';
+import { getCompanies, getAgentsByCompany, getSession, getCostSummary, type Agent } from '@/lib/api';
+import { getStatusConfig, fmtTokens, ICON_RINGS, TEXT, LAYOUT } from '@/lib/tokens';
+import { cn } from '@/lib/utils';
+import {
+  PageHeader, PageBody, PageLayout,
+  StatCard, StatGrid,
+  SectionHeader,
+  StatusBadge, MonoBadge, AlertBanner,
+  DataTable, TR, TD,
+  RightSidebar, SidebarSection, SidebarDivider, SidebarRow, SidebarMetricCard, SidebarNavLink,
+  MiniProgressBar,
+} from '@/components/ui';
 
 export const metadata: Metadata = { title: 'Dashboard' };
 
 export default async function DashboardPage() {
-  const [companies, session] = await Promise.all([
-    getCompanies(),
-    getSession(),
+  const [companies, session, costSummary] = await Promise.all([
+    getCompanies(), getSession(), getCostSummary(),
   ]);
 
   const safeCompanies = companies ?? [];
-
-  // Fetch agents for all companies in parallel
-  const agentLists = await Promise.all(
-    safeCompanies.map(c => getAgentsByCompany(c.id))
-  );
+  const agentLists = await Promise.all(safeCompanies.map(c => getAgentsByCompany(c.id)));
 
   const allAgents: (Agent & { companyName: string; companyPrefix: string })[] = [];
-  safeCompanies.forEach((c, i) => {
+  safeCompanies.forEach((c, i) =>
     (agentLists[i] ?? []).forEach(a =>
       allAgents.push({ ...a, companyName: c.name, companyPrefix: c.issuePrefix })
-    );
-  });
+    )
+  );
 
   const totalAgents  = allAgents.length;
   const errorAgents  = allAgents.filter(a => a.status === 'error').length;
   const activeAgents = allAgents.filter(a => a.status === 'active').length;
   const idleAgents   = allAgents.filter(a => a.status === 'idle').length;
 
-  const stats = [
-    {
-      label: 'Companies',
-      value: safeCompanies.length,
-      icon: Building2,
-      iconClass: 'stat-icon-blue',
-      href: '/companies',
-      sub: `${safeCompanies.filter(c => c.status === 'active').length} active`,
-    },
-    {
-      label: 'Total Agents',
-      value: totalAgents,
-      icon: Bot,
-      iconClass: 'stat-icon-purple',
-      href: '/agents',
-      sub: `${activeAgents} active · ${idleAgents} idle`,
-    },
-    {
-      label: 'Agent Errors',
-      value: errorAgents,
-      icon: AlertCircle,
-      iconClass: errorAgents > 0 ? 'stat-icon-red' : 'stat-icon-green',
-      href: '/agents',
-      sub: errorAgents > 0 ? 'Requires attention' : 'All healthy',
-    },
-    {
-      label: 'Connected',
-      value: session ? '✓' : '✗',
-      icon: Activity,
-      iconClass: session ? 'stat-icon-green' : 'stat-icon-red',
-      href: '/settings',
-      sub: session ? `${session.email}` : 'Auth error',
-    },
-  ];
+  const totalTokens  = costSummary ? Number(costSummary.total?.total_tokens  ?? 0) : 0;
+  const todayTokens  = costSummary ? Number(costSummary.today?.tokens        ?? 0) : 0;
+  const cachedTokens = costSummary ? Number(costSummary.total?.cached_tokens ?? 0) : 0;
+  const cacheRate    = (cachedTokens + totalTokens) > 0
+    ? Math.round((cachedTokens / (cachedTokens + totalTokens)) * 100) : 0;
+  const todayEvents  = costSummary ? Number(costSummary.today?.events ?? 0) : 0;
+  const topAgents    = costSummary?.topAgents ?? [];
+
+  const sidebar = (
+    <RightSidebar>
+      <SidebarSection title="Quick Access">
+        <div className="space-y-0.5 -mx-1">
+          <SidebarNavLink href="/costs"      label="Token Usage"      sub={fmtTokens(totalTokens)} icon={Zap} />
+          <SidebarNavLink href="/skills"     label="Skills Registry"  sub="Governance"             icon={BookOpen} />
+          <SidebarNavLink href="/heartbeats" label="Runtime Control"  sub="Agent configs"          icon={Heart} />
+          <SidebarNavLink href="/audit"      label="Anti-Bloat Audit" sub="Run checks"             icon={Shield} />
+          <SidebarNavLink href="/secrets"    label="Secrets"          sub="AES-256-GCM"            icon={Target} />
+        </div>
+      </SidebarSection>
+
+      <SidebarDivider />
+
+      <SidebarSection title="Token Health">
+        <SidebarMetricCard
+          label="Cache Hit Rate"
+          value={`${cacheRate}%`}
+          valueClass="text-success"
+          bar={{ value: cacheRate, max: 100 }}
+          barColor="bg-success/50"
+        />
+        <div className="space-y-1 mt-3">
+          <SidebarRow label="Total"  value={fmtTokens(totalTokens)} />
+          <SidebarRow label="Today"  value={fmtTokens(todayTokens)} />
+          <SidebarRow label="Cached" value={fmtTokens(cachedTokens)} valueClass="text-success" />
+        </div>
+      </SidebarSection>
+
+      <SidebarDivider />
+
+      <SidebarSection title="System">
+        <div className="space-y-1">
+          <SidebarRow label="Phase"     value="1 — Foundation" />
+          <SidebarRow label="Companies" value={String(safeCompanies.length)} />
+          <SidebarRow label="API"       value={session ? 'Connected' : 'Down'} valueClass={session ? 'text-success' : 'text-destructive'} />
+          <SidebarRow label="Context"   value="Thin" valueClass="text-success" />
+        </div>
+      </SidebarSection>
+    </RightSidebar>
+  );
 
   return (
-    <>
-      <div className="page-header">
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <div>
-            <h1 className="page-header-title">Control Center</h1>
-            <div className="page-header-sub">
-              AI operations overview — {new Date().toLocaleDateString('en-US', {
-                weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
-              })}
-            </div>
+    <PageLayout sidebar={sidebar}>
+      {/* Header */}
+      <PageHeader
+        title="Control Center"
+        subtitle={new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
+        badge={session ? (
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <span className="w-2 h-2 rounded-full bg-success animate-pulse" />
+            <span className="text-success font-semibold">Live</span>
+            <span className="text-muted-foreground/40">·</span>
+            <span>{session.email}</span>
           </div>
-          {session && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <div className="badge badge-active">Live</div>
-              <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                {session.email}
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
+        ) : undefined}
+      />
 
-      <div className="page-body">
-
-        {/* Error alert */}
+      <PageBody>
+        {/* Error banner */}
         {errorAgents > 0 && (
-          <div className="alert alert-danger" style={{ marginBottom: 24 }}>
-            <AlertCircle size={16} style={{ flexShrink: 0, marginTop: 1 }} />
-            <div>
-              <div style={{ fontWeight: 600 }}>
-                {errorAgents} agent{errorAgents > 1 ? 's' : ''} in error state
-              </div>
-              <div style={{ fontSize: 12, marginTop: 2, opacity: 0.85 }}>
-                {allAgents.filter(a => a.status === 'error').map(a => `${a.companyPrefix} → ${a.name}`).join(' · ')}
-              </div>
-            </div>
-          </div>
+          <AlertBanner
+            icon={AlertCircle}
+            title={`${errorAgents} agent${errorAgents > 1 ? 's' : ''} need attention`}
+            detail={allAgents.filter(a => a.status === 'error').map(a => `${a.companyPrefix} → ${a.name}`).join(' · ')}
+            href="/agents"
+            variant="error"
+          />
         )}
 
-        {/* No API warning */}
-        {!session && (
-          <div className="alert alert-warning" style={{ marginBottom: 24 }}>
-            <Zap size={16} style={{ flexShrink: 0, marginTop: 1 }} />
+        {/* Stats */}
+        <StatGrid cols={5}>
+          <StatCard label="Companies"   value={safeCompanies.length} sub={`${safeCompanies.filter(c => c.status === 'active').length} active`} icon={Building2} color="text-primary"     ring="primary"                                                                href="/companies" />
+          <StatCard label="Agents"      value={totalAgents}          sub={`${activeAgents} active · ${idleAgents} idle`}                       icon={Bot}        color="text-chart-2"     ring="chart2"                                                                href="/agents" />
+          <StatCard label="Errors"      value={errorAgents}          sub={errorAgents > 0 ? 'Needs attention' : 'All healthy'}                  icon={AlertCircle} color={errorAgents > 0 ? 'text-destructive' : 'text-success'} ring={errorAgents > 0 ? 'destructive' : 'success'} href="/agents" />
+          <StatCard label="Total Tokens" value={fmtTokens(totalTokens)} sub={`${fmtTokens(todayTokens)} today`}                               icon={Zap}        color="text-warning"     ring="warning"                                                                href="/costs" />
+          <StatCard label="Cache Rate"  value={`${cacheRate}%`}      sub={`${fmtTokens(cachedTokens)} saved`}                                  icon={Activity}   color="text-success"     ring="success"                                                                href="/costs" />
+        </StatGrid>
+
+        {/* Mid grid */}
+        <div className="grid grid-cols-5 gap-6">
+          {/* Companies + Agent Fleet — 3 col */}
+          <div className="col-span-3 space-y-6">
             <div>
-              <div style={{ fontWeight: 600 }}>API connection issue</div>
-              <div style={{ fontSize: 12, marginTop: 2, opacity: 0.85 }}>
-                Make sure the PCC API is running on <code>localhost:3001</code>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Stat cards */}
-        <div className="grid-4 mb-6">
-          {stats.map(stat => (
-            <Link key={stat.label} href={stat.href} style={{ textDecoration: 'none' }}>
-              <div className="stat-card">
-                <div className={`stat-icon ${stat.iconClass}`}>
-                  <stat.icon size={20} />
-                </div>
-                <div className="card-label">{stat.label}</div>
-                <div className="card-value">{stat.value}</div>
-                <div className="card-description mt-4">{stat.sub}</div>
-              </div>
-            </Link>
-          ))}
-        </div>
-
-        <div className="grid-2">
-
-          {/* Companies panel */}
-          <div>
-            <div className="section-header mb-4">
-              <div>
-                <div className="section-title">Companies</div>
-                <div className="section-subtitle">Registered Paperclip companies</div>
-              </div>
-              <Link href="/companies" className="btn btn-secondary btn-sm">
-                View All
-              </Link>
-            </div>
-
-            <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-              {safeCompanies.length === 0 ? (
-                <div style={{ padding: '32px', textAlign: 'center', color: 'var(--text-muted)' }}>
-                  <Building2 size={32} style={{ opacity: 0.3, margin: '0 auto 12px' }} />
-                  <div style={{ fontSize: 13 }}>No companies found</div>
-                </div>
-              ) : (
-                <table className="data-table">
-                  <thead>
-                    <tr>
-                      <th>Company</th>
-                      <th>Agents</th>
-                      <th>Prefix</th>
-                      <th>Status</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {safeCompanies.map((company, i) => {
-                      const agents = agentLists[i] ?? [];
-                      const errs = agents.filter(a => a.status === 'error').length;
-                      return (
-                        <tr key={company.id}>
-                          <td>
-                            <Link
-                              href={`/companies/${company.id}`}
-                              style={{ color: 'var(--accent-primary)', textDecoration: 'none', fontWeight: 600 }}
-                            >
-                              {company.name}
-                            </Link>
-                          </td>
-                          <td>
-                            <span style={{ fontWeight: 600 }}>{agents.length}</span>
-                            {errs > 0 && (
-                              <span style={{ color: 'var(--accent-danger)', marginLeft: 6, fontSize: 11 }}>
-                                {errs} error
-                              </span>
-                            )}
-                          </td>
-                          <td><span className="mono">{company.issuePrefix}</span></td>
-                          <td>
-                            <span className={`badge ${statusVariant(company.status)}`}>
-                              {company.status}
-                            </span>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              )}
-            </div>
-          </div>
-
-          {/* Agent status panel */}
-          <div>
-            <div className="section-header mb-4">
-              <div>
-                <div className="section-title">Agent Status</div>
-                <div className="section-subtitle">All agents across companies</div>
-              </div>
-              <Link href="/agents" className="btn btn-secondary btn-sm">
-                View All
-              </Link>
+              <SectionHeader title="Companies" subtitle={`${safeCompanies.length} registered organizations`} href="/companies" />
+              <DataTable
+                columns={[
+                  { key: 'company', label: 'Company' },
+                  { key: 'agents',  label: 'Agents' },
+                  { key: 'prefix',  label: 'Prefix' },
+                  { key: 'status',  label: 'Status' },
+                  { key: 'nav',     label: '' },
+                ]}
+                hasRows={safeCompanies.length > 0}
+                empty={{ icon: Building2, message: 'No companies found' }}
+              >
+                {safeCompanies.map((company, i) => {
+                  const agents = agentLists[i] ?? [];
+                  const errs   = agents.filter(a => a.status === 'error').length;
+                  return (
+                    <TR key={company.id}>
+                      <TD sub={undefined}>
+                        <Link href={`/companies/${company.id}`} className={TEXT.link}>{company.name}</Link>
+                      </TD>
+                      <TD>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[14px] font-semibold text-card-foreground">{agents.length}</span>
+                          {errs > 0 && <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-destructive/10 text-destructive">{errs} err</span>}
+                        </div>
+                      </TD>
+                      <TD><MonoBadge>{company.issuePrefix}</MonoBadge></TD>
+                      <TD><StatusBadge status={company.status} /></TD>
+                      <td className="px-5 py-4 border-b border-border/40 text-right">
+                        <Link href={`/companies/${company.id}`} className="text-muted-foreground/30 hover:text-primary transition-colors no-underline">
+                          <ArrowUpRight className="w-4 h-4 inline" />
+                        </Link>
+                      </td>
+                    </TR>
+                  );
+                })}
+              </DataTable>
             </div>
 
-            <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+            {/* Agent Fleet */}
+            <div>
+              <SectionHeader
+                title="Agent Fleet"
+                subtitle={`${totalAgents} agents across ${safeCompanies.length} companies`}
+                href="/agents"
+              />
               {allAgents.length === 0 ? (
-                <div style={{ padding: '32px', textAlign: 'center', color: 'var(--text-muted)' }}>
-                  <Activity size={28} style={{ opacity: 0.3, margin: '0 auto 8px' }} />
-                  <div style={{ fontSize: 13 }}>No agents registered</div>
+                <div className="bg-card border border-border rounded-xl py-12 text-center">
+                  <Activity size={24} className="text-muted-foreground/15 mx-auto mb-3" />
+                  <p className="text-sm text-muted-foreground">No agents registered</p>
                 </div>
               ) : (
-                <>
-                  {/* Progress bar */}
-                  <div style={{ display: 'flex', height: 4 }}>
-                    <div style={{ flex: activeAgents, background: 'var(--accent-success)', transition: 'flex 0.5s' }} />
-                    <div style={{ flex: errorAgents, background: 'var(--accent-danger)', transition: 'flex 0.5s' }} />
-                    <div style={{ flex: idleAgents, background: 'var(--border-strong)', transition: 'flex 0.5s' }} />
+                <div className="bg-card border border-border rounded-xl overflow-hidden">
+                  {/* Status bar */}
+                  <div className="flex h-1.5">
+                    <div className="bg-success transition-all duration-700" style={{ flex: activeAgents || 0 }} />
+                    <div className="bg-destructive transition-all duration-700" style={{ flex: errorAgents || 0 }} />
+                    <div className="bg-muted-foreground/20 transition-all duration-700" style={{ flex: idleAgents || 0 }} />
                   </div>
-
-                  {/* Summary row */}
-                  <div style={{ display: 'flex', gap: 20, padding: '12px 16px', borderBottom: '1px solid var(--border-subtle)' }}>
-                    <div style={{ display: 'flex', flexDirection: 'column' }}>
-                      <span style={{ fontSize: 18, fontWeight: 800, color: 'var(--accent-success)' }}>{activeAgents}</span>
-                      <span style={{ fontSize: 10, color: 'var(--text-muted)', textTransform: 'uppercase' }}>Active</span>
-                    </div>
-                    <div style={{ display: 'flex', flexDirection: 'column' }}>
-                      <span style={{ fontSize: 18, fontWeight: 800, color: errorAgents > 0 ? 'var(--accent-danger)' : 'var(--text-muted)' }}>{errorAgents}</span>
-                      <span style={{ fontSize: 10, color: 'var(--text-muted)', textTransform: 'uppercase' }}>Error</span>
-                    </div>
-                    <div style={{ display: 'flex', flexDirection: 'column' }}>
-                      <span style={{ fontSize: 18, fontWeight: 800, color: 'var(--text-secondary)' }}>{idleAgents}</span>
-                      <span style={{ fontSize: 10, color: 'var(--text-muted)', textTransform: 'uppercase' }}>Idle</span>
-                    </div>
-                    <div style={{ display: 'flex', flexDirection: 'column' }}>
-                      <span style={{ fontSize: 18, fontWeight: 800, color: 'var(--text-secondary)' }}>{totalAgents}</span>
-                      <span style={{ fontSize: 10, color: 'var(--text-muted)', textTransform: 'uppercase' }}>Total</span>
-                    </div>
+                  {/* Summary */}
+                  <div className="flex items-center gap-8 px-6 py-4 border-b border-border">
+                    {[
+                      { label: 'Active', value: activeAgents, cls: 'text-success' },
+                      { label: 'Error',  value: errorAgents,  cls: errorAgents > 0 ? 'text-destructive' : 'text-muted-foreground' },
+                      { label: 'Idle',   value: idleAgents,   cls: 'text-foreground' },
+                      { label: 'Total',  value: totalAgents,  cls: 'text-foreground' },
+                    ].map(s => (
+                      <div key={s.label} className="flex items-baseline gap-1.5">
+                        <span className={cn('text-xl font-bold', s.cls)} style={{ letterSpacing: '-0.03em' }}>{s.value}</span>
+                        <span className={TEXT.label}>{s.label}</span>
+                      </div>
+                    ))}
                   </div>
-
-                  {/* Top agents list */}
-                  <table className="data-table">
-                    <tbody>
-                      {allAgents
-                        .sort((a, b) => (a.status === 'error' ? -1 : b.status === 'error' ? 1 : 0))
-                        .slice(0, 8)
-                        .map(agent => (
-                          <tr key={agent.id}>
-                            <td>
-                              <div style={{ fontWeight: 600, fontSize: 13 }}>{agent.name}</div>
-                              <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                                {agent.companyName}
-                              </div>
-                            </td>
-                            <td style={{ textAlign: 'right' }}>
-                              <span className={`badge ${statusVariant(agent.status)}`}>
-                                {agent.status}
-                              </span>
-                            </td>
-                          </tr>
-                        ))}
-                    </tbody>
-                  </table>
-
-                  {allAgents.length > 8 && (
-                    <div style={{ padding: '10px 16px', borderTop: '1px solid var(--border-subtle)' }}>
-                      <Link
-                        href="/agents"
-                        style={{ fontSize: 12, color: 'var(--accent-primary)', display: 'flex', alignItems: 'center', gap: 4 }}
-                      >
-                        View all {allAgents.length} agents <ChevronRight size={12} />
+                  {/* Grid */}
+                  <div className="grid grid-cols-2 divide-x divide-border">
+                    {allAgents
+                      .sort((a, b) => a.status === 'error' ? -1 : b.status === 'error' ? 1 : 0)
+                      .slice(0, 6)
+                      .map(agent => (
+                        <div key={agent.id} className="px-5 py-3.5 border-b border-border/40 hover:bg-muted/20 transition-colors">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <div className="text-[13px] font-semibold text-card-foreground truncate leading-snug">{agent.name}</div>
+                              <div className="text-[11px] text-muted-foreground mt-0.5">{agent.companyName}</div>
+                            </div>
+                            <StatusBadge status={agent.status} />
+                          </div>
+                        </div>
+                      ))}
+                  </div>
+                  {allAgents.length > 6 && (
+                    <div className="px-6 py-3 border-t border-border bg-muted/20">
+                      <Link href="/agents" className={TEXT.viewAll}>
+                        View all {allAgents.length} agents <ArrowUpRight size={13} />
                       </Link>
                     </div>
                   )}
-                </>
+                </div>
               )}
             </div>
           </div>
+
+          {/* Activity — 2 col */}
+          <div className="col-span-2 space-y-4">
+            <SectionHeader title="Today's Activity" subtitle="Real-time agent metrics" />
+
+            {/* Token usage */}
+            <div className="bg-card border border-border rounded-xl p-5">
+              <div className="flex items-end justify-between mb-3">
+                <div>
+                  <div className={cn(TEXT.label, 'mb-1')}>Token Usage</div>
+                  <div className="text-2xl font-bold text-card-foreground" style={{ letterSpacing: '-0.04em' }}>{fmtTokens(todayTokens)}</div>
+                </div>
+                <div className="text-right">
+                  <div className={cn(TEXT.label, 'mb-1')}>Runs</div>
+                  <div className="text-2xl font-bold text-chart-2" style={{ letterSpacing: '-0.04em' }}>{todayEvents}</div>
+                </div>
+              </div>
+              <MiniProgressBar value={todayTokens} max={totalTokens * 0.33} colorClass="bg-primary/50" />
+              <div className="text-[11px] text-muted-foreground mt-1.5">of {fmtTokens(totalTokens)} total</div>
+            </div>
+
+            {/* Cache rate */}
+            <div className="bg-card border border-border rounded-xl p-5">
+              <div className="flex items-center justify-between mb-3">
+                <div className={TEXT.label}>Cache Hit Rate</div>
+                <span className={cn('text-[11px] font-bold px-2 py-0.5 rounded-md', cacheRate >= 80 ? 'bg-success/10 text-success' : 'bg-warning/10 text-warning')}>
+                  {cacheRate >= 80 ? 'Excellent' : 'Good'}
+                </span>
+              </div>
+              <div className="text-3xl font-bold text-success mb-3" style={{ letterSpacing: '-0.04em' }}>{cacheRate}%</div>
+              <MiniProgressBar value={cacheRate} max={100} colorClass="bg-success/60" height="h-2" />
+              <div className="text-[11px] text-muted-foreground mt-2">{fmtTokens(cachedTokens)} tokens saved</div>
+            </div>
+
+            {/* Top agents */}
+            {topAgents.length > 0 && (
+              <div className="bg-card border border-border rounded-xl p-5">
+                <div className={cn(TEXT.label, 'mb-3')}>Top Agents</div>
+                <div className="space-y-3">
+                  {topAgents.slice(0, 4).map((a, idx) => {
+                    const maxT = Number(topAgents[0]?.tokens ?? 1);
+                    return (
+                      <div key={a.name}>
+                        <div className="flex items-center justify-between mb-1">
+                          <div className="flex items-center gap-2">
+                            <span className="text-[10px] font-bold text-muted-foreground/30 w-4 tabular-nums">{idx + 1}</span>
+                            <span className="text-[13px] font-medium text-card-foreground">{a.name}</span>
+                          </div>
+                          <span className="font-mono text-[11px] text-muted-foreground tabular-nums">{fmtTokens(Number(a.tokens))}</span>
+                        </div>
+                        <MiniProgressBar value={Number(a.tokens)} max={maxT} colorClass="bg-chart-2/40" height="h-1" />
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
-      </div>
-    </>
+
+
+      </PageBody>
+    </PageLayout>
   );
 }

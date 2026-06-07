@@ -9,24 +9,67 @@
 
 import type { FastifyPluginAsync } from 'fastify';
 import { NodeSSH } from 'node-ssh';
+import { existsSync } from 'node:fs';
+import { resolve, join } from 'node:path';
+import { homedir } from 'node:os';
 
 const VPS_HOST = process.env.VPS_HOST ?? '72.61.82.22';
 const VPS_USER = process.env.VPS_USER ?? 'root';
-const VPS_KEY_PATH = process.env.VPS_SSH_KEY_PATH;
 const VPS_PASSWORD = process.env.VPS_PASSWORD;
 const COMPOSE_DIR = '/docker/paperclip-cumf';
 const ENV_FILE = `${COMPOSE_DIR}/.env`;
 
+function findSSHKey(): string | null {
+  const home = homedir();
+  const candidates = [
+    // Configured paths
+    process.env.VPS_SSH_KEY_PATH,
+    process.env.VPS_SSH_KEY,
+    // Common default keys
+    join(home, '.ssh', 'id_ed25519'),
+    join(home, '.ssh', 'id_rsa'),
+    join(home, '.ssh', 'pcc_vps'),
+  ].filter(Boolean) as string[];
+
+  for (const raw of candidates) {
+    const resolved = raw.startsWith('~') ? resolve(home, raw.slice(2)) : raw;
+    if (existsSync(resolved)) return resolved;
+  }
+  return null;
+}
+
 async function getSSH() {
   const ssh = new NodeSSH();
-  const connectOpts: any = { host: VPS_HOST, username: VPS_USER };
-  if (VPS_KEY_PATH) {
-    connectOpts.privateKeyPath = VPS_KEY_PATH;
-  } else if (VPS_PASSWORD) {
-    connectOpts.password = VPS_PASSWORD;
+  const keyPath = findSSHKey();
+
+  // 1. Try SSH key
+  if (keyPath) {
+    try {
+      await ssh.connect({ host: VPS_HOST, username: VPS_USER, privateKeyPath: keyPath });
+      return ssh;
+    } catch {
+      // Key failed, try next method
+    }
   }
-  await ssh.connect(connectOpts);
-  return ssh;
+
+  // 2. Try SSH agent (how terminal SSH connects)
+  const agentSock = process.env.SSH_AUTH_SOCK;
+  if (agentSock) {
+    try {
+      await ssh.connect({ host: VPS_HOST, username: VPS_USER, agent: agentSock });
+      return ssh;
+    } catch {
+      // Agent failed, try password
+    }
+  }
+
+  // 3. Fall back to password
+  if (VPS_PASSWORD) {
+    await ssh.connect({ host: VPS_HOST, username: VPS_USER, password: VPS_PASSWORD });
+    return ssh;
+  }
+
+  throw new Error('No valid SSH key, agent, or password configured for VPS');
 }
 
 export const vpsLlmRoutes: FastifyPluginAsync = async (app) => {
@@ -43,12 +86,14 @@ export const vpsLlmRoutes: FastifyPluginAsync = async (app) => {
         const trimmed = l.trim();
         return trimmed.startsWith(key + '=') && trimmed.split('=').slice(1).join('=').trim().length > 0;
       });
+      const get = (key: string) =>
+        lines.find(l => l.startsWith(key + '='))?.split('=').slice(1).join('=') ?? null;
 
       return reply.send({
         openai: {
           configured: has('OPENAI_API_KEY'),
-          baseUrl: lines.find(l => l.startsWith('OPENAI_BASE_URL='))?.split('=').slice(1).join('=') ?? null,
-          model: lines.find(l => l.startsWith('CODEX_DEFAULT_MODEL='))?.split('=').slice(1).join('=') ?? 'gpt-5.3-codex',
+          baseUrl: get('OPENAI_BASE_URL'),
+          model: get('CODEX_DEFAULT_MODEL') ?? 'gpt-5.3-codex',
         },
         anthropic: {
           configured: has('ANTHROPIC_API_KEY'),
@@ -70,13 +115,21 @@ export const vpsLlmRoutes: FastifyPluginAsync = async (app) => {
       openaiBaseUrl?: string;
       openaiModel?: string;
       anthropicApiKey?: string;
+      glmApiKey?: string;
+      glmBaseUrl?: string;
+      glmModel?: string;
       restart?: boolean;
     }
   }>('/llm-config', async (req, reply) => {
-    const { openaiApiKey, openaiBaseUrl, openaiModel, anthropicApiKey, restart = true } = req.body;
+    const {
+      openaiApiKey, openaiBaseUrl, openaiModel,
+      anthropicApiKey,
+      glmApiKey, glmBaseUrl, glmModel,
+      restart = true,
+    } = req.body;
 
-    if (!openaiApiKey && !anthropicApiKey) {
-      return reply.status(400).send({ error: 'Provide at least openaiApiKey or anthropicApiKey' });
+    if (!openaiApiKey && !anthropicApiKey && !glmApiKey) {
+      return reply.status(400).send({ error: 'Provide at least one API key (openaiApiKey, anthropicApiKey, or glmApiKey)' });
     }
 
     try {
@@ -98,7 +151,6 @@ export const vpsLlmRoutes: FastifyPluginAsync = async (app) => {
 
       if (openaiApiKey) {
         upsert('OPENAI_API_KEY', openaiApiKey);
-        // If Z.ai key with custom base URL
         if (openaiBaseUrl) {
           upsert('OPENAI_BASE_URL', openaiBaseUrl);
         }
@@ -109,6 +161,12 @@ export const vpsLlmRoutes: FastifyPluginAsync = async (app) => {
 
       if (anthropicApiKey) {
         upsert('ANTHROPIC_API_KEY', anthropicApiKey);
+      }
+
+      if (glmApiKey) {
+        upsert('GLM_API_KEY', glmApiKey);
+        upsert('GLM_BASE_URL', glmBaseUrl ?? 'https://open.bigmodel.cn/api/paas/v4');
+        upsert('GLM_MODEL', glmModel ?? 'glm-5.1');
       }
 
       // Write back
@@ -127,6 +185,7 @@ export const vpsLlmRoutes: FastifyPluginAsync = async (app) => {
             openai: !!openaiApiKey,
             openaiBaseUrl: openaiBaseUrl ?? null,
             anthropic: !!anthropicApiKey,
+            glm: !!glmApiKey,
           },
           restart: restartOut || restartErr,
         });

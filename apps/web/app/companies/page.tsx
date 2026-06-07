@@ -1,157 +1,199 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
-import { Building2, Bot, AlertCircle, ChevronRight } from 'lucide-react';
-import { getCompanies, getAgentsByCompany, statusVariant, fmtDate } from '@/lib/api';
+import { Building2, Bot, AlertCircle, TrendingUp, ArrowUpRight } from 'lucide-react';
+import { getCompanies, getAgentsByCompany, fmtDate } from '@/lib/api';
+import { TEXT, CARD } from '@/lib/tokens';
+import { cn } from '@/lib/utils';
+import {
+  PageHeader, PageBody, PageLayout,
+  StatCard, StatGrid,
+  SectionHeader,
+  StatusBadge, MonoBadge,
+  RightSidebar, SidebarSection, SidebarDivider, SidebarRow,
+  MiniProgressBar,
+} from '@/components/ui';
 
 export const metadata: Metadata = { title: 'Companies' };
 
+function fmtBudget(cents: number) {
+  if (!cents) return '—';
+  return `$${(cents / 100).toLocaleString('en-US', { minimumFractionDigits: 0 })}`;
+}
+
 export default async function CompaniesPage() {
   const companies = await getCompanies() ?? [];
+  const agentLists = await Promise.all(companies.map(c => getAgentsByCompany(c.id)));
 
-  const agentLists = await Promise.all(
-    companies.map(c => getAgentsByCompany(c.id))
-  );
+  const rows = companies.map((c, i) => ({
+    ...c,
+    agents:       agentLists[i] ?? [],
+    errorAgents:  (agentLists[i] ?? []).filter(a => a.status === 'error').length,
+    activeAgents: (agentLists[i] ?? []).filter(a => a.status === 'active').length,
+  }));
 
-  return (
-    <>
-      <div className="page-header">
-        <div>
-          <h1 className="page-header-title">Companies</h1>
-          <div className="page-header-sub">
-            {companies.length} registered Paperclip companies
-          </div>
+  const totalAgents     = rows.reduce((s, r) => s + r.agents.length, 0);
+  const totalErrors     = rows.reduce((s, r) => s + r.errorAgents, 0);
+  const activeCompanies = rows.filter(r => r.status === 'active').length;
+
+  const sidebar = (
+    <RightSidebar>
+      <SidebarSection title="Fleet Overview">
+        <div className="space-y-3">
+          {rows.map(r => {
+            const pct = totalAgents > 0 ? Math.round((r.agents.length / totalAgents) * 100) : 0;
+            return (
+              <div key={r.id}>
+                <div className="flex items-center justify-between mb-1">
+                  <Link href={`/companies/${r.id}`} className="text-[13px] font-medium text-foreground no-underline hover:text-primary transition-colors">{r.name}</Link>
+                  <span className="text-[11px] text-muted-foreground">{r.agents.length} agents</span>
+                </div>
+                <MiniProgressBar
+                  value={r.agents.length}
+                  max={totalAgents}
+                  colorClass={r.errorAgents > 0 ? 'bg-destructive/50' : 'bg-primary/50'}
+                />
+                <div className="flex justify-between mt-1">
+                  <span className="text-[11px] text-muted-foreground/60">{pct}% of fleet</span>
+                  {r.errorAgents > 0 && <span className="text-[11px] text-destructive font-semibold">{r.errorAgents} err</span>}
+                </div>
+              </div>
+            );
+          })}
         </div>
-      </div>
+      </SidebarSection>
 
-      <div className="page-body">
+      <SidebarDivider />
 
-        {companies.length === 0 ? (
-          <div className="card" style={{ textAlign: 'center', padding: '64px 32px' }}>
-            <Building2 size={48} style={{ opacity: 0.2, margin: '0 auto 16px' }} />
-            <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 8 }}>No companies found</div>
-            <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>
-              Check that the PCC API is running and the Paperclip instance is reachable.
-            </div>
-          </div>
+      <SidebarSection title="Budget">
+        {rows.filter(r => r.budgetMonthlyCents > 0).length === 0 ? (
+          <p className="text-[13px] text-muted-foreground">No budgets configured</p>
         ) : (
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 16 }}>
-            {companies.map((company, i) => {
-              const agents = agentLists[i] ?? [];
-              const errorCount = agents.filter(a => a.status === 'error').length;
-              const activeCount = agents.filter(a => a.status === 'active').length;
-
+          <div className="space-y-3">
+            {rows.filter(r => r.budgetMonthlyCents > 0).map(r => {
+              const spentPct = r.budgetMonthlyCents > 0 ? Math.min((r.spentMonthlyCents / r.budgetMonthlyCents) * 100, 100) : 0;
               return (
-                <Link
-                  key={company.id}
-                  href={`/companies/${company.id}`}
-                  style={{ textDecoration: 'none' }}
-                >
-                  <div className="card" style={{ cursor: 'pointer', transition: 'all 250ms ease' }}>
-                    <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16 }}>
-
-                      {/* Left: info */}
-                      <div style={{ flex: 1 }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
-                          <div
-                            style={{
-                              width: 36,
-                              height: 36,
-                              borderRadius: 8,
-                              background: company.brandColor
-                                ? `${company.brandColor}22`
-                                : 'var(--accent-primary-glow)',
-                              border: `1px solid ${company.brandColor ?? 'var(--border-accent)'}40`,
-                              display: 'flex',
-                              alignItems: 'center',
-                              justifyContent: 'center',
-                              color: company.brandColor ?? 'var(--accent-primary)',
-                              fontSize: 14,
-                              fontWeight: 700,
-                            }}
-                          >
-                            {company.issuePrefix.slice(0, 2)}
-                          </div>
-                          <div>
-                            <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--text-primary)' }}>
-                              {company.name}
-                            </div>
-                            <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                              {company.id.slice(0, 8)}…
-                            </div>
-                          </div>
-                        </div>
-
-                        {company.description && (
-                          <div style={{
-                            fontSize: 12,
-                            color: 'var(--text-muted)',
-                            lineHeight: 1.5,
-                            marginBottom: 12,
-                            maxWidth: 600,
-                          }}>
-                            {company.description.slice(0, 200)}{company.description.length > 200 ? '…' : ''}
-                          </div>
-                        )}
-
-                        {/* Tags */}
-                        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                          <span className="mono">{company.issuePrefix}</span>
-                          <span className={`badge ${statusVariant(company.status)}`}>
-                            {company.status}
-                          </span>
-                          {errorCount > 0 && (
-                            <span className="badge badge-error">
-                              {errorCount} error{errorCount > 1 ? 's' : ''}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-
-                      {/* Right: stats */}
-                      <div style={{ display: 'flex', gap: 24, alignItems: 'center', flexShrink: 0 }}>
-                        <div style={{ textAlign: 'center' }}>
-                          <div style={{ fontSize: 20, fontWeight: 800, color: 'var(--text-primary)' }}>
-                            {agents.length}
-                          </div>
-                          <div style={{ fontSize: 10, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                            Agents
-                          </div>
-                        </div>
-
-                        {activeCount > 0 && (
-                          <div style={{ textAlign: 'center' }}>
-                            <div style={{ fontSize: 20, fontWeight: 800, color: 'var(--accent-success)' }}>
-                              {activeCount}
-                            </div>
-                            <div style={{ fontSize: 10, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                              Active
-                            </div>
-                          </div>
-                        )}
-
-                        {errorCount > 0 && (
-                          <div style={{ textAlign: 'center' }}>
-                            <div style={{ fontSize: 20, fontWeight: 800, color: 'var(--accent-danger)' }}>
-                              {errorCount}
-                            </div>
-                            <div style={{ fontSize: 10, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                              Errors
-                            </div>
-                          </div>
-                        )}
-
-                        <div style={{ color: 'var(--text-muted)' }}>
-                          <ChevronRight size={18} />
-                        </div>
-                      </div>
-                    </div>
+                <div key={r.id}>
+                  <div className="flex justify-between mb-1">
+                    <span className="text-[13px] font-medium text-foreground">{r.issuePrefix}</span>
+                    <span className="text-[11px] text-muted-foreground">{fmtBudget(r.spentMonthlyCents)} / {fmtBudget(r.budgetMonthlyCents)}</span>
                   </div>
-                </Link>
+                  <MiniProgressBar value={spentPct} max={100} colorClass={spentPct > 80 ? 'bg-destructive/60' : 'bg-success/50'} />
+                </div>
               );
             })}
           </div>
         )}
-      </div>
-    </>
+      </SidebarSection>
+
+      <SidebarDivider />
+
+      <SidebarSection title="Quick Links">
+        <div className="space-y-0.5">
+          {rows.map(r => (
+            <Link key={r.id} href={`/companies/${r.id}`}
+              className="group flex items-center justify-between px-3 py-2 rounded-lg hover:bg-muted/60 transition-all no-underline -mx-1">
+              <span className="text-[13px] font-medium text-foreground group-hover:text-primary transition-colors">{r.name}</span>
+              <ArrowUpRight className="w-3.5 h-3.5 text-muted-foreground/30 group-hover:text-primary transition-colors" />
+            </Link>
+          ))}
+        </div>
+      </SidebarSection>
+    </RightSidebar>
+  );
+
+  return (
+    <PageLayout sidebar={sidebar}>
+      <PageHeader
+        title="Companies"
+        subtitle={`${companies.length} registered · ${activeCompanies} active`}
+      />
+
+      <PageBody>
+        {/* Stats */}
+        <StatGrid cols={4}>
+          <StatCard label="Companies"    value={companies.length} icon={Building2}   color="text-primary"     ring="primary"                                                                    />
+          <StatCard label="Active"       value={activeCompanies}  icon={TrendingUp}  color="text-success"     ring="success"                                                                    />
+          <StatCard label="Total Agents" value={totalAgents}      icon={Bot}         color="text-chart-2"     ring="chart2"                                                                     />
+          <StatCard label="Agent Errors" value={totalErrors}      icon={AlertCircle} color={totalErrors > 0 ? 'text-destructive' : 'text-success'} ring={totalErrors > 0 ? 'destructive' : 'success'} />
+        </StatGrid>
+
+        {/* Company cards */}
+        <div>
+          <SectionHeader
+            title="Organizations"
+            subtitle={`${rows.length} company${rows.length !== 1 ? 'ies' : 'y'} registered`}
+          />
+
+          {rows.length === 0 ? (
+            <div className={cn(CARD.table, 'py-16 text-center')}>
+              <Building2 size={28} className="text-muted-foreground/15 mx-auto mb-3" />
+              <p className="text-sm text-muted-foreground">No companies registered</p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 gap-5">
+              {rows.map(company => (
+                <div key={company.id} className={cn(CARD.hover, 'overflow-hidden')}>
+                  {/* Card header */}
+                  <div className="px-6 py-5 border-b border-border">
+                    <div className="flex items-start justify-between">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2.5 mb-2 flex-wrap">
+                          <h2 className="text-[16px] font-bold text-card-foreground tracking-tight">{company.name}</h2>
+                          <MonoBadge>{company.issuePrefix}</MonoBadge>
+                          <StatusBadge status={company.status} />
+                        </div>
+                        {company.description && (
+                          <p className="text-[13px] text-muted-foreground leading-relaxed line-clamp-2">{company.description}</p>
+                        )}
+                      </div>
+                      <Link href={`/companies/${company.id}`}
+                        className="p-2 rounded-lg hover:bg-muted text-muted-foreground/40 hover:text-primary transition-all no-underline flex-shrink-0 ml-3">
+                        <ArrowUpRight className="w-4 h-4" />
+                      </Link>
+                    </div>
+                  </div>
+
+                  {/* Stats row */}
+                  <div className="grid grid-cols-3 divide-x divide-border">
+                    {[
+                      { label: 'Agents', value: company.agents.length, sub: `${company.activeAgents} active`, color: 'text-card-foreground' },
+                      { label: 'Errors', value: company.errorAgents, sub: company.errorAgents > 0 ? 'Needs attention' : 'All healthy', color: company.errorAgents > 0 ? 'text-destructive' : 'text-success' },
+                      { label: 'Budget', value: fmtBudget(company.budgetMonthlyCents), sub: company.spentMonthlyCents > 0 ? `${fmtBudget(company.spentMonthlyCents)} spent` : 'monthly', color: 'text-card-foreground' },
+                    ].map(stat => (
+                      <div key={stat.label} className="px-5 py-4">
+                        <div className={cn(TEXT.label, 'mb-1.5')}>{stat.label}</div>
+                        <div className={cn('text-[18px] font-bold', stat.color)} style={{ letterSpacing: '-0.03em' }}>{stat.value}</div>
+                        <div className="text-[11px] text-muted-foreground mt-0.5">{stat.sub}</div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Agent tags */}
+                  {company.agents.length > 0 && (
+                    <div className="px-6 pt-3 pb-4 border-t border-border/40">
+                      <div className="flex flex-wrap gap-1.5">
+                        {company.agents.slice(0, 5).map(a => (
+                          <span key={a.id} className={cn(
+                            'text-[11px] px-2.5 py-0.5 rounded-full font-medium',
+                            a.status === 'error' ? 'bg-destructive/10 text-destructive' : 'bg-muted text-muted-foreground'
+                          )}>
+                            {a.name}
+                          </span>
+                        ))}
+                        {company.agents.length > 5 && (
+                          <span className="text-[11px] px-2.5 py-0.5 rounded-full bg-muted text-muted-foreground">
+                            +{company.agents.length - 5} more
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </PageBody>
+    </PageLayout>
   );
 }

@@ -5,16 +5,34 @@ import { config } from 'dotenv';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// Load env — root .env first, then .env.local if present
+// Load env — walk up from cwd to find root .env
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const root = resolve(__dirname, '../../..');
-config({ path: resolve(root, '.env') });
-config({ path: resolve(root, '.env.local'), override: false });
+
+// Try multiple possible root locations
+const candidates = [
+  resolve(__dirname, '../../..'),   // apps/api/src -> root
+  resolve(__dirname, '../..'),      // apps/api/src -> apps
+  resolve(process.cwd(), '../..'),  // apps/api -> root (pnpm sets cwd to package dir)
+  resolve(process.cwd(), '..'),     // one level up
+  process.cwd(),                    // current dir
+];
+
+for (const dir of candidates) {
+  config({ path: resolve(dir, '.env') });
+  config({ path: resolve(dir, '.env.local'), override: false });
+}
 
 import { paperclipProxyRoutes } from './routes/paperclip.js';
 import { secretsRoutes } from './routes/secret-vault.js';
 import { auditRoutes, notificationsRoutes } from './routes/channels.js';
 import { vpsLlmRoutes } from './routes/vps-llm.js';
+import { vpsRunnerRoutes } from './routes/vps-runner.js';
+import { controlRoutes } from './routes/control.js';
+import { goalsRoutes } from './routes/goals.js';
+import { routinesRoutes } from './routes/routines.js';
+import { memoryRoutes } from './routes/memory.js';
+import { knowledgeRoutes } from './routes/knowledge.js';
+import { contextRoutes } from './routes/context.js';
 import { authPlugin } from './plugins/auth.js';
 
 const PORT = parseInt(process.env.API_PORT ?? '3001', 10);
@@ -52,12 +70,23 @@ async function buildApp() {
   await app.register(paperclipProxyRoutes, { prefix: '/api/paperclip' });
 
   // PCC-owned data (SQLite)
-  await app.register(secretsRoutes,      { prefix: '/api/secrets' });
-  await app.register(auditRoutes,        { prefix: '/api/audit' });
-  await app.register(notificationsRoutes, { prefix: '/api/notifications' });
+  await app.register(secretsRoutes,        { prefix: '/api/secrets' });
+  await app.register(auditRoutes,          { prefix: '/api/audit' });
+  await app.register(notificationsRoutes,  { prefix: '/api/notifications' });
+
+  // Intelligence — goals, routines, memory, knowledge, context
+  await app.register(goalsRoutes,    { prefix: '/api/goals' });
+  await app.register(routinesRoutes, { prefix: '/api/routines' });
+  await app.register(memoryRoutes,   { prefix: '/api/memory' });
+  await app.register(knowledgeRoutes, { prefix: '/api/knowledge' });
+  await app.register(contextRoutes,  { prefix: '/api/context' });
 
   // VPS management
-  await app.register(vpsLlmRoutes,       { prefix: '/api/vps' });
+  await app.register(vpsLlmRoutes,    { prefix: '/api/vps' });
+  await app.register(vpsRunnerRoutes, { prefix: '/api/vps' });
+
+  // Control plane — write access to Paperclip VPS DB
+  await app.register(controlRoutes,   { prefix: '/api/control' });
 
   app.setNotFoundHandler((_req, reply) => {
     reply.status(404).send({ success: false, error: 'Route not found' });
