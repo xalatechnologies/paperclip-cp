@@ -7,6 +7,10 @@ settings:
 importers:
 
   .:
+    dependencies:
+      convex:
+        specifier: ^1.40.0
+        version: 1.40.0(react@19.2.7)
     devDependencies:
       '@typescript-eslint/eslint-plugin':
         specifier: ^8.0.0
@@ -127,6 +131,9 @@ importers:
       clsx:
         specifier: ^2.1.0
         version: 2.1.1
+      convex:
+        specifier: ^1.40.0
+        version: 1.40.0(react@19.2.7)
       lucide-react:
         specifier: ^0.511.0
         version: 0.511.0(react@19.2.7)

@@ -1,6 +1,8 @@
 import type { Metadata } from 'next';
 import './globals.css';
 import { Sidebar } from '@/components/layout/Sidebar';
+import { ConvexClientProvider } from './ConvexClientProvider';
+
 
 export const metadata: Metadata = {
   title: {
@@ -15,12 +17,14 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en" className="h-full">
       <body className="h-full">
-        <div className="flex h-full min-h-screen">
-          <Sidebar />
-          <main className="ml-[220px] flex-1 flex flex-col min-h-screen bg-background">
-            {children}
-          </main>
-        </div>
+        <ConvexClientProvider>
+          <div className="flex h-full min-h-screen">
+            <Sidebar />
+            <main className="ml-[220px] flex-1 flex flex-col min-h-screen bg-background">
+              {children}
+            </main>
+          </div>
+        </ConvexClientProvider>
       </body>
     </html>
   );
