@@ -16,7 +16,7 @@ const crons = cronJobs();
 crons.interval(
   "sync-vps-routines",
   { minutes: 5 },
-  internal.routines.syncFromVps,
+  internal.jobs.syncVpsRoutines,
   {},
 );
 

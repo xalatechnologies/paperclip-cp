@@ -6,10 +6,9 @@
  * The UI reads from Convex reactively (WebSocket) — no polling.
  */
 
-import { query, mutation, internalMutation, internalAction } from "./_generated/server";
+import { query, internalMutation } from "./_generated/server";
 import { v } from "convex/values";
-import { internal } from "./_generated/api";
-import type { ActionCtx, MutationCtx } from "./_generated/server";
+
 
 // ── Queries ────────────────────────────────────────────────────────────────
 
@@ -129,53 +128,3 @@ export const recordRun = internalMutation({
   },
 });
 
-// ── Internal Action: Sync from VPS ───────────────────────────────────────
-// Called by cron every 5 minutes via the PCC API bridge.
-// The action fetches routines from Fastify (/api/control/routines)
-// and upserts them into Convex.
-
-export const syncFromVps = internalAction({
-  args: {},
-  handler: async (ctx: ActionCtx) => {
-    const apiBase = process.env.PCC_API_URL ?? "http://localhost:3001";
-    const apiKey  = process.env.CONTROL_CENTER_API_KEY ?? "";
-
-    try {
-      const res = await fetch(`${apiBase}/api/control/routines`, {
-        headers: { Authorization: `Bearer ${apiKey}` },
-        signal: AbortSignal.timeout(15_000),
-      });
-
-      if (!res.ok) {
-        console.error(`[routines] VPS sync failed: HTTP ${res.status}`);
-        return;
-      }
-
-      const raw: unknown = await res.json();
-      const data = Array.isArray(raw) ? (raw as any[]) : [];
-      if (data.length === 0) return;
-
-
-      const routines = data.map((r: any) => ({
-        vps_job_id:      String(r.id),
-        name:            r.name ?? "Unnamed",
-        cron_expression: r.cron_expression ?? "* * * * *",
-        enabled:         Boolean(r.enabled),
-        agent_id:        String(r.agent_id ?? ""),
-        skill_slug:      r.skill_slug ?? undefined,
-        company_id:      String(r.company_id ?? ""),
-        company_name:    r.company_name ?? "Unknown",
-        agent_name:      r.agent_name ?? "Unknown",
-        last_run_at:     r.last_run_at ?? undefined,
-        last_status:     r.last_status ?? undefined,
-        run_count:       Number(r.run_count ?? 0),
-        avg_duration_sec: r.avg_duration_sec != null ? Number(r.avg_duration_sec) : undefined,
-      }));
-
-      await ctx.runMutation(internal.routines.upsertFromVps, { routines });
-      console.log(`[routines] Synced ${routines.length} jobs from VPS`);
-    } catch (err: any) {
-      console.error("[routines] Sync error:", err.message);
-    }
-  },
-});

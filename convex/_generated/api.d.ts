@@ -10,6 +10,7 @@
 
 import type * as crons from "../crons.js";
 import type * as goals from "../goals.js";
+import type * as jobs from "../jobs.js";
 import type * as memory from "../memory.js";
 import type * as routines from "../routines.js";
 
@@ -22,6 +23,7 @@ import type {
 declare const fullApi: ApiFromModules<{
   crons: typeof crons;
   goals: typeof goals;
+  jobs: typeof jobs;
   memory: typeof memory;
   routines: typeof routines;
 }>;
