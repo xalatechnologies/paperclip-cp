@@ -8,11 +8,18 @@
  * @module
  */
 
+import type * as agents from "../agents.js";
+import type * as audit from "../audit.js";
+import type * as channels from "../channels.js";
+import type * as config from "../config.js";
+import type * as context from "../context.js";
 import type * as crons from "../crons.js";
 import type * as goals from "../goals.js";
 import type * as jobs from "../jobs.js";
+import type * as knowledge from "../knowledge.js";
 import type * as memory from "../memory.js";
 import type * as routines from "../routines.js";
+import type * as secrets from "../secrets.js";
 
 import type {
   ApiFromModules,
@@ -21,11 +28,18 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  agents: typeof agents;
+  audit: typeof audit;
+  channels: typeof channels;
+  config: typeof config;
+  context: typeof context;
   crons: typeof crons;
   goals: typeof goals;
   jobs: typeof jobs;
+  knowledge: typeof knowledge;
   memory: typeof memory;
   routines: typeof routines;
+  secrets: typeof secrets;
 }>;
 
 /**

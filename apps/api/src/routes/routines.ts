@@ -1,99 +1,65 @@
 /**
  * Routines Routes — /api/routines
  *
- * CRUD for scheduled agent runs. Toggle, run now, view run history.
- * On create/toggle/delete: calls refreshCrons() to re-sync the scheduler.
- * On "run now": calls executeRoutine() from the cron executor (real agent trigger).
+ * PCC-managed scheduled agent runs. Read from Convex (mirror of VPS scheduled_jobs).
+ * Execute via VPS SSH (cron executor). Run history also from Convex.
+ *
+ * Note: The VPS is the authoritative source for scheduled_jobs.
+ * Convex is a real-time mirror, synced every 5 minutes by convex/crons.ts.
+ * Manual "run now" calls the VPS directly via executeRoutine().
  */
 
 import type { FastifyPluginAsync } from 'fastify';
 import { validate as cronValidate } from 'node-cron';
-import { routinesDb, routineRunsDb } from '../db.js';
-import { executeRoutine, refreshCrons } from '../cron.js';
+import { convex, api } from '../convex-client.js';
+import { executeRoutine } from '../cron.js';
 
 export const routinesRoutes: FastifyPluginAsync = async (app) => {
 
-  // List all routines
-  app.get('/', async (_req, reply) => {
-    const routines = routinesDb.list.all();
+  // List all routines (from Convex mirror — real-time)
+  app.get<{ Querystring: { company_id?: string } }>('/', async (req, reply) => {
+    const routines = await convex.query(api.routines.list, {
+      company_id: req.query.company_id,
+    });
     return reply.send(routines);
   });
 
-  // Get single routine with run history
+  // Get single routine with recent runs
   app.get<{ Params: { id: string } }>('/:id', async (req, reply) => {
-    const routine = routinesDb.get.get(req.params.id);
+    const routines = await convex.query(api.routines.list, {});
+    const routine  = (routines as any[]).find((r) => r._id === req.params.id || r.vps_job_id === req.params.id);
     if (!routine) return reply.status(404).send({ error: 'Routine not found' });
-    const runs = routineRunsDb.list.all(req.params.id);
+
+    const runs = await convex.query(api.routines.recentRuns, {
+      vps_job_id: routine.vps_job_id,
+      limit: 20,
+    });
     return reply.send({ ...routine, runs });
   });
 
-  // Create routine
-  app.post<{
-    Body: {
-      name: string;
-      paperclip_company_id: string;
-      paperclip_agent_id: string;
-      skill_slug?: string;
-      schedule: string;
-      enabled?: boolean;
-    };
-  }>('/', async (req, reply) => {
-    const { name, paperclip_company_id, paperclip_agent_id, skill_slug, schedule, enabled } = req.body;
-    if (!name || !paperclip_company_id || !paperclip_agent_id || !schedule) {
-      return reply.status(400).send({ error: 'name, company_id, agent_id, schedule required' });
-    }
-    if (!cronValidate(schedule)) {
-      return reply.status(400).send({ error: 'schedule must be a valid 5-field cron expression' });
-    }
-    const routine = routinesDb.insert.get({
-      name, paperclip_company_id, paperclip_agent_id,
-      skill_slug: skill_slug ?? null,
-      schedule,
-      enabled: enabled !== false ? 1 : 0,
-    });
-    // Re-sync cron scheduler
-    refreshCrons();
-    return reply.status(201).send(routine);
-  });
-
-  // Toggle enabled/disabled
-  app.patch<{
-    Params: { id: string };
-    Body: { enabled: boolean };
-  }>('/:id/toggle', async (req, reply) => {
-    const routine = routinesDb.get.get(req.params.id);
-    if (!routine) return reply.status(404).send({ error: 'Routine not found' });
-    routinesDb.toggle.run({ id: req.params.id, enabled: req.body.enabled ? 1 : 0 });
-    // Re-sync cron scheduler
-    refreshCrons();
-    return reply.send({ id: req.params.id, enabled: req.body.enabled });
-  });
-
-  // Run now (manual trigger via cron executor)
-  app.post<{ Params: { id: string } }>('/:id/run', async (req, reply) => {
-    const routine = routinesDb.get.get(req.params.id) as any;
+  // Run now (manual trigger via VPS SSH cron executor)
+  app.post<{ Params: { vpsJobId: string } }>('/:vpsJobId/run', async (req, reply) => {
+    const routines = await convex.query(api.routines.list, {});
+    const routine  = (routines as any[]).find(
+      (r) => r.vps_job_id === req.params.vpsJobId
+    );
     if (!routine) return reply.status(404).send({ error: 'Routine not found' });
     if (!routine.enabled) return reply.status(400).send({ error: 'Routine is disabled' });
 
-    // Respond immediately — run is async
-    reply.status(202).send({ message: 'Run triggered', routine_id: req.params.id });
+    // Respond immediately — execute is async
+    reply.status(202).send({ message: 'Run triggered', vps_job_id: req.params.vpsJobId });
 
-    // Execute via the real cron executor (fires Paperclip agent trigger)
-    executeRoutine(req.params.id).catch((err: Error) => {
-      console.error(`[routines] Manual run failed for ${req.params.id}:`, err.message);
+    executeRoutine(req.params.vpsJobId).catch((err: Error) => {
+      console.error(`[routines] Manual run failed for ${req.params.vpsJobId}:`, err.message);
     });
-  });
-
-  // Delete routine
-  app.delete<{ Params: { id: string } }>('/:id', async (req, reply) => {
-    routinesDb.delete.run(req.params.id);
-    refreshCrons(); // Remove from scheduler
-    return reply.send({ deleted: true });
   });
 
   // Run history for a routine
   app.get<{ Params: { id: string } }>('/:id/runs', async (req, reply) => {
-    const runs = routineRunsDb.list.all(req.params.id);
+    const runs = await convex.query(api.routines.recentRuns, {
+      vps_job_id: req.params.id,
+      limit: 50,
+    });
     return reply.send(runs);
   });
 };

@@ -19,5 +19,11 @@
       "@pcc/config": ["./packages/config/src/index.ts"]
     }
   },
-  "exclude": ["node_modules", "dist", ".next"]
+  "exclude": [
+    "node_modules",
+    "dist",
+    ".next",
+    "apps/web",
+    "apps/worker"
+  ]
 }

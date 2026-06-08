@@ -6,8 +6,9 @@
  * The UI reads from Convex reactively (WebSocket) — no polling.
  */
 
-import { query, internalMutation } from "./_generated/server";
+import { query, mutation, internalMutation } from "./_generated/server";
 import { v } from "convex/values";
+import type { MutationCtx, QueryCtx } from "./_generated/server";
 
 
 // ── Queries ────────────────────────────────────────────────────────────────
@@ -40,6 +41,18 @@ export const recentRuns = query({
         .take(limit);
     }
     return await ctx.db.query("routineRuns").order("desc").take(limit);
+  },
+});
+
+export const listActiveRuns = query({
+  args: {},
+  handler: async (ctx) => {
+    // There's no status index on routineRuns right now, but there shouldn't be
+    // more than a few running at any given time anyway.
+    // However, the best way without a dedicated index is to filter all runs.
+    // If the table grows large, this needs an index, but for now we take recent runs and filter.
+    const recent = await ctx.db.query("routineRuns").order("desc").take(100);
+    return recent.filter(r => r.status === "running");
   },
 });
 
@@ -88,9 +101,10 @@ export const upsertFromVps = internalMutation({
   },
 });
 
-export const recordRun = internalMutation({
+export const recordRun = mutation({
   args: {
     vps_job_id:   v.string(),
+    routine_id:   v.optional(v.id("routines")),
     started_at:   v.string(),
     finished_at:  v.optional(v.string()),
     status:       v.string(),
@@ -98,16 +112,20 @@ export const recordRun = internalMutation({
     output:       v.optional(v.string()),
     error:        v.optional(v.string()),
   },
-  handler: async (ctx, args) => {
-    // Link to local routine record
-    const routine = await ctx.db
-      .query("routines")
-      .withIndex("by_vps_job_id", (q) => q.eq("vps_job_id", args.vps_job_id))
-      .unique();
+  handler: async (ctx: MutationCtx, args) => {
+    // Resolve routine by vps_job_id if routine_id not provided
+    let routineId = args.routine_id;
+    if (!routineId) {
+      const routine = await ctx.db
+        .query("routines")
+        .withIndex("by_vps_job_id", (q) => q.eq("vps_job_id", args.vps_job_id))
+        .unique();
+      routineId = routine?._id;
+    }
 
     const runId = await ctx.db.insert("routineRuns", {
       vps_job_id:   args.vps_job_id,
-      routine_id:   routine?._id,
+      routine_id:   routineId,
       started_at:   args.started_at,
       finished_at:  args.finished_at,
       status:       args.status,
@@ -116,9 +134,8 @@ export const recordRun = internalMutation({
       error:        args.error,
     });
 
-    // Update routine last_status + last_run_at
-    if (routine) {
-      await ctx.db.patch(routine._id, {
+    if (routineId) {
+      await ctx.db.patch(routineId, {
         last_status: args.status,
         last_run_at: args.started_at,
       });
@@ -128,3 +145,100 @@ export const recordRun = internalMutation({
   },
 });
 
+export const updateLastRun = mutation({
+  args: {
+    _id:         v.id("routines"),
+    last_run_at: v.string(),
+    last_status: v.string(),
+  },
+  handler: async (ctx: MutationCtx, args) => {
+    await ctx.db.patch(args._id, {
+      last_run_at: args.last_run_at,
+      last_status: args.last_status,
+    });
+  },
+});
+
+// ── Live run status (two-way sync + streaming) ─────────────────────────────
+
+/** Called BEFORE triggering agent — creates a "running" record the UI sees instantly */
+export const startRun = mutation({
+  args: {
+    vps_job_id:  v.string(),
+    routine_id:  v.optional(v.id("routines")),
+    started_at:  v.string(),
+  },
+  handler: async (ctx: MutationCtx, args) => {
+    let routineId = args.routine_id;
+    if (!routineId) {
+      const routine = await ctx.db
+        .query("routines")
+        .withIndex("by_vps_job_id", (q) => q.eq("vps_job_id", args.vps_job_id))
+        .unique();
+      routineId = routine?._id;
+    }
+
+    const runId = await ctx.db.insert("routineRuns", {
+      vps_job_id:  args.vps_job_id,
+      routine_id:  routineId,
+      started_at:  args.started_at,
+      status:      "running",
+    });
+
+    // Mark routine as running
+    if (routineId) {
+      await ctx.db.patch(routineId, { last_status: "running", last_run_at: args.started_at });
+    }
+
+    return runId;
+  },
+});
+
+/** Append partial output during long-running agents (optional live streaming) */
+export const appendLiveOutput = mutation({
+  args: {
+    run_id: v.id("routineRuns"),
+    chunk:  v.string(),
+  },
+  handler: async (ctx: MutationCtx, args) => {
+    const run = await ctx.db.get(args.run_id);
+    if (!run) return;
+    const current = run.live_output ?? "";
+    await ctx.db.patch(args.run_id, {
+      live_output: (current + args.chunk).slice(-8000), // keep last 8k chars
+    });
+  },
+});
+
+/** Called AFTER agent finishes — updates the "running" record with final result */
+export const finishRun = mutation({
+  args: {
+    run_id:       v.id("routineRuns"),
+    finished_at:  v.string(),
+    status:       v.string(), // "success" | "failed"
+    duration_sec: v.optional(v.number()),
+    output:       v.optional(v.string()),
+    error:        v.optional(v.string()),
+  },
+  handler: async (ctx: MutationCtx, args) => {
+    const run = await ctx.db.get(args.run_id);
+    if (!run) return;
+
+    await ctx.db.patch(args.run_id, {
+      finished_at:  args.finished_at,
+      status:       args.status,
+      duration_sec: args.duration_sec,
+      output:       args.output,
+      error:        args.error,
+      live_output:  undefined, // clear streaming buffer
+    });
+
+    // Update routine last_status
+    if (run.routine_id) {
+      await ctx.db.patch(run.routine_id, {
+        last_status: args.status,
+        last_run_at: args.finished_at,
+      });
+    }
+  },
+});

@@ -4,7 +4,7 @@ import { ConvexProvider, ConvexReactClient } from 'convex/react';
 import { ReactNode } from 'react';
 
 // Created once at module scope — not inside a component
-const convex = new ConvexReactClient(process.env.NEXT_PUBLIC_CONVEX_URL!);
+const convex = new ConvexReactClient(process.env.NEXT_PUBLIC_CONVEX_URL || 'https://blessed-bandicoot-99.eu-west-1.convex.cloud');
 
 export function ConvexClientProvider({ children }: { children: ReactNode }) {
   return <ConvexProvider client={convex}>{children}</ConvexProvider>;

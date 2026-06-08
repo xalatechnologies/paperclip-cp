@@ -4,10 +4,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "build": "tsc -p tsconfig.json",
-    "start": "node dist/index.js",
-    "lint": "eslint src",
+    "dev":       "tsx watch --env-file=../../.env src/index.ts",
+    "dev:local": "tsx watch src/index.ts",
+    "build":     "tsc -p tsconfig.json",
+    "start":     "node --env-file=../../.env dist/index.js",
+    "test":      "vitest run",
+    "lint":      "eslint src",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -16,7 +18,7 @@
     "@pcc/config": "workspace:*",
     "@pcc/paperclip-sdk": "workspace:*",
     "@pcc/shared-types": "workspace:*",
-    "better-sqlite3": "^11.10.0",
+    "convex": "^1.40.0",
     "dotenv": "^16.5.0",
     "fastify": "^5.2.0",
     "fastify-plugin": "^5.0.0",
@@ -27,7 +29,6 @@
     "zod": "^3.24.0"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.0",
     "@types/node-cron": "^3.0.11",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0"

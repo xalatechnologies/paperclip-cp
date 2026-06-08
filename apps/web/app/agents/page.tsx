@@ -1,5 +1,5 @@
 'use client';
-
+// Force recompile to pick up NEXT_PUBLIC_ env var
 /**
  * Agents Page — Live Client Component
  *

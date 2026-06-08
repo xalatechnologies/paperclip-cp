@@ -5,7 +5,7 @@
  * Progress rollup runs automatically on every task status change.
  */
 
-import { query, mutation, internalMutation } from "./_generated/server";
+import { query, mutation, internalMutation, internalQuery } from "./_generated/server";
 import { v } from "convex/values";
 import { Id, Doc } from "./_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
@@ -257,5 +257,119 @@ export const deleteTask = mutation({
     await ctx.db.delete(args.id);
     await rollupMilestone(ctx, args.milestone_id);
     await rollupGoal(ctx, args.goal_id);
+  },
+});
+
+// ── Internal: bulk upsert from API (push model) ───────────────────────────
+
+export const upsertGoalFromApi = internalMutation({
+  args: {
+    paperclip_company_id: v.string(),
+    title:       v.string(),
+    description: v.optional(v.string()),
+    status:      v.optional(v.string()),
+    priority:    v.optional(v.string()),
+    progress_pct: v.optional(v.number()),
+    due_date:    v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    // Insert always — goals created via API are new records
+    return ctx.db.insert("goals", {
+      paperclip_company_id: args.paperclip_company_id,
+      title:        args.title,
+      description:  args.description,
+      status:       (args.status as any)   ?? "planned",
+      priority:     (args.priority as any) ?? "medium",
+      progress_pct: args.progress_pct      ?? 0,
+      due_date:     args.due_date,
+      // pushed_at intentionally omitted — marks as "pending writeback"
+    });
+  },
+});
+
+// ── Two-way sync: Convex → Paperclip ────────────────────────────────────────
+
+/** Mark a goal as successfully pushed to Paperclip */
+export const markPushed = internalMutation({
+  args: {
+    _id:               v.id("goals"),
+    paperclip_goal_id: v.string(),
+  },
+  handler: async (ctx, args) => {
+    await ctx.db.patch(args._id, {
+      paperclip_goal_id: args.paperclip_goal_id,
+      pushed_at:         Date.now(),
+    });
+  },
+});
+
+/** Goals not yet pushed to Paperclip (no pushed_at) */
+export const listPendingPush = query({
+  args: { company_id: v.optional(v.string()) },
+  handler: async (ctx) => {
+    const all = await ctx.db.query("goals").take(200);
+    return all.filter((g) => !g.pushed_at);
+  },
+});
+
+/** Internal version — called by convex/jobs.ts pushPendingGoals action */
+export const listPendingPushInternal = internalQuery({
+  args: {},
+  handler: async (ctx) => {
+    const all = await ctx.db.query("goals").take(200);
+    return all.filter((g) => !g.pushed_at);
+  },
+});
+
+/** Sync goals FROM Paperclip API into Convex (inbound) */
+export const upsertFromPaperclip = internalMutation({
+  args: {
+    goals: v.array(v.object({
+      paperclip_goal_id: v.string(),
+      paperclip_company_id: v.string(),
+      title:        v.string(),
+      description:  v.optional(v.string()),
+      status:       v.string(),
+      priority:     v.optional(v.string()),
+      progress_pct: v.optional(v.number()),
+      due_date:     v.optional(v.string()),
+    })),
+  },
+  handler: async (ctx, args) => {
+    let upserted = 0;
+    for (const g of args.goals) {
+      const existing = await ctx.db
+        .query("goals")
+        .withIndex("by_paperclip_id", (q) =>
+          q.eq("paperclip_goal_id", g.paperclip_goal_id)
+        )
+        .unique();
+
+      if (existing) {
+        await ctx.db.patch(existing._id, {
+          title:        g.title,
+          description:  g.description,
+          status:       (g.status as any) ?? "planned",
+          priority:     (g.priority as any) ?? "medium",
+          progress_pct: g.progress_pct ?? 0,
+          due_date:     g.due_date,
+          pushed_at:    Date.now(), // mark as synced
+        });
+      } else {
+        await ctx.db.insert("goals", {
+          paperclip_company_id: g.paperclip_company_id,
+          paperclip_goal_id:    g.paperclip_goal_id,
+          title:        g.title,
+          description:  g.description,
+          status:       (g.status as any) ?? "planned",
+          priority:     (g.priority as any) ?? "medium",
+          progress_pct: g.progress_pct ?? 0,
+          due_date:     g.due_date,
+          pushed_at:    Date.now(),
+        });
+      }
+      upserted++;
+    }
+    return upserted;
   },
 });

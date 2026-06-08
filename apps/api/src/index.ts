@@ -35,6 +35,9 @@ import { knowledgeRoutes } from './routes/knowledge.js';
 import { contextRoutes } from './routes/context.js';
 import { authPlugin } from './plugins/auth.js';
 import { startCronExecutor } from './cron.js';
+import { loadRemoteConfig } from './config-loader.js';
+import { disposeSSH } from './vps-db.js';
+import { initAdminAuth } from './convex-client.js';
 
 const PORT = parseInt(process.env.API_PORT ?? '3001', 10);
 const IS_DEV = process.env.NODE_ENV !== 'production';
@@ -60,11 +63,13 @@ async function buildApp() {
   await app.register(authPlugin);
 
   app.get('/health', async () => ({
-    status: 'ok',
-    version: '0.1.0',
+    status:    'ok',
+    version:   '0.1.0',
     timestamp: new Date().toISOString(),
     paperclip: process.env.PAPERCLIP_BASE_URL ?? 'not configured',
-    db: 'sqlite (.pcc/pcc.db)',
+    convex:    process.env.NEXT_PUBLIC_CONVEX_URL ?? process.env.CONVEX_URL ?? 'local',
+    db:        'Convex (blessed-bandicoot-99, EU West)',
+    sync:      'bidirectional — VPS↔Convex every 2-10 min',
   }));
 
   // Paperclip API proxy
@@ -106,24 +111,37 @@ async function buildApp() {
 }
 
 async function main() {
+  // 1. Initialize admin auth from env (env-file loads before module init in tsx)
+  //    Calling here as belt-and-suspenders for non-tsx environments
+  initAdminAuth();
+
+  // 2. Load remote config from Convex (non-bootstrap secrets)
+  //    Falls back gracefully if Convex isn't available yet
+  await loadRemoteConfig();
+
   const app = await buildApp();
   await app.listen({ port: PORT, host: '0.0.0.0' });
 
-  // Start real cron executor — reads routines table and schedules all enabled routines
+  // Start cron executor — heartbeat + routine scheduling
   startCronExecutor();
 
   console.log(`\n🚀 PCC API       → http://localhost:${PORT}`);
-  console.log(`🔀 Proxy         → ${process.env.PAPERCLIP_BASE_URL ?? '⚠  PAPERCLIP_BASE_URL not set'}`);
-  console.log(`🗄  Database      → SQLite (.pcc/pcc.db)`);
-  console.log(`🕐 Cron          → Real cron executor active`);
-  console.log(`🧠 Embeddings    → ${process.env.OPENAI_API_KEY ? 'text-embedding-3-small (enabled)' : '⚠  OPENAI_API_KEY not set (keyword fallback)'}`);
-  console.log(`📋 Health        → http://localhost:${PORT}/health`);
-  console.log(`\n   /api/paperclip/*    → Paperclip API proxy`);
-  console.log(`   /api/secrets        → Encrypted vault`);
-  console.log(`   /api/audit          → Audit trail`);
-  console.log(`   /api/context/inject → System prompt builder`);
-  console.log(`   /api/context/distill→ Memory distillation\n`);
+  console.log(`🔀 Proxy         → ${process.env.PAPERCLIP_BASE_URL ?? '⚠️  PAPERCLIP_BASE_URL not set (check Convex env vars)'}`);
+  console.log(`🗄️  Database      → Convex (${process.env.NEXT_PUBLIC_CONVEX_URL ?? process.env.CONVEX_URL ?? 'local'})`);
+  console.log(`🔐 Secrets       → AES-256-GCM vault in Convex`);
+  console.log(`🧠 Embeddings    → ${process.env.OPENAI_API_KEY ? 'text-embedding-3-small ✓' : '⚠️  OPENAI_API_KEY not set'}`);
+  console.log(`🔄 Sync          → bidirectional VPS↔Convex every 2 min`);
+  console.log(`📋 Health        → http://localhost:${PORT}/health\n`);
 }
+
+async function shutdown() {
+  console.log('\n[api] Shutting down…');
+  disposeSSH();
+  process.exit(0);
+}
+
+process.on('SIGTERM', shutdown);
+process.on('SIGINT',  shutdown);
 
 main().catch((err) => {
   console.error(err);
