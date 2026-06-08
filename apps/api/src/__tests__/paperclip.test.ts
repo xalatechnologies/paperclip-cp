@@ -1,6 +1,13 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
 import Fastify from 'fastify';
 import { paperclipProxyRoutes } from '../routes/paperclip';
+import { getSession } from '../paperclip-session';
+
+vi.mock('../paperclip-session', () => ({
+  getSession: vi.fn(),
+  invalidateSession: vi.fn(),
+  getBaseUrl: () => 'https://mock.paperclip.test',
+}));
 
 describe('Paperclip Proxy Routes', () => {
   const fastify = Fastify();
@@ -19,10 +26,11 @@ describe('Paperclip Proxy Routes', () => {
 
   it('proxies GET /api/paperclip/companies correctly', async () => {
     // Mock the session fetch
-    fetchMock.mockResolvedValueOnce({
-      ok: true,
-      headers: { get: () => 'session-cookie=123' },
-      json: async () => ({}),
+    (getSession as any).mockResolvedValueOnce({
+      cookie: 'paperclip-default.session_token=123',
+      userId: 'user-1',
+      email: 'test@example.com',
+      loggedInAt: Date.now(),
     });
 
     // Mock the target API fetch
@@ -44,10 +52,10 @@ describe('Paperclip Proxy Routes', () => {
     
     // Check that fetch was called correctly for the target API
     expect(fetchMock).toHaveBeenCalledWith(
-      expect.stringContaining('/api/v1/companies'),
+      expect.stringContaining('/api/companies'),
       expect.objectContaining({
         headers: expect.objectContaining({
-          cookie: 'session-cookie=123',
+          Cookie: 'paperclip-default.session_token=123',
         }),
       })
     );
